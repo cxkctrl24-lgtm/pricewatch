@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>硬件比价 · DDR4 / DDR5 / RTX50</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0f14'/%3E%3Cpath d='M9 21l7-11 7 11' stroke='%232fd6c3' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='24' r='2' fill='%23ffb454'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="topbar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <div>
+      <h1>硬件比价工作台</h1>
+      <p class="sub">淘宝 · 京东 · 拼多多　|　DDR5 / DDR4 内存 · RTX 50 系显卡</p>
+    </div>
+  </div>
+  <div class="top-right">
+    <span class="chip" id="schedChip">每日 {{ schedule_time }} 自动采集</span>
+    {% if gentle %}<span class="chip chip-gentle" id="gentleChip" title="慢速拟真：进站先逛首页、滚动随机停顿、关键词之间歇 3–7 秒">🛡 温和模式</span>{% endif %}
+    <a class="ghost-btn" href="/api/export.csv">导出 CSV</a>
+    <span class="dot" id="aliveDot"></span>
+  </div>
+</div>
+
+<div class="wrap">
+  <!-- 左：平台登录 + 采集控制 -->
+  <section class="col-left">
+    <div class="panel">
+      <div class="panel-head"><h2>平台登录</h2><span class="hint">点登录 → 弹窗扫码 → 关掉窗口即完成</span></div>
+      <div class="platforms" id="platformCards">
+        {% for p in platforms %}
+        <div class="pcard" data-platform="{{ p.id }}">
+          <div class="pcard-top">
+            <span class="pname">{{ p.name }}</span>
+            <span class="badge" data-role="login-badge">未知</span>
+          </div>
+          <div class="pcard-sub" data-role="login-text">还没检测登录态</div>
+          <div class="pcard-hint">{% if p.login_mode == 'sms' %}📱 {{ p.login_hint }}{% else %}📷 {{ p.login_hint }}{% endif %}</div>
+          <div class="pcard-actions">
+            <button class="btn small" data-role="login-btn" data-platform="{{ p.id }}">
+              {% if p.login_mode == 'sms' %}登录 / 填手机号{% else %}登录 / 扫码{% endif %}
+            </button>
+            <button class="ghost-btn tiny" data-role="check-btn" data-platform="{{ p.id }}">检测</button>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      <p class="tip">登录状态会保存在本机 <code>data/profiles/</code>，下次开程序不用重登（有效期通常几天到几周）。</p>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>开始采集</h2></div>
+      <div class="field">
+        <label>要抓的品类</label>
+        <div class="chips" id="groupChips">
+          {% for g in groups %}
+          <label class="chip-check">
+            <input type="checkbox" value="{{ g.id }}" checked>
+            <span>{{ g.name }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="field">
+        <label>要抓的平台</label>
+        <div class="chips" id="platformChips">
+          {% for p in platforms %}
+          <label class="chip-check">
+            <input type="checkbox" value="{{ p.id }}" checked>
+            <span>{{ p.name }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn primary" id="startBtn">开始采集</button>
+        <button class="ghost-btn" id="cancelBtn" disabled>取消</button>
+      </div>
+      <div class="progress-wrap" id="progressWrap" hidden>
+        <div class="progress"><div class="bar" id="progressBar"></div></div>
+        <div class="progress-text" id="progressText">准备中…</div>
+      </div>
+      <div class="mini-log" id="miniLog"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>关键词管理</h2><span class="hint">每个词都会单独搜一遍</span></div>
+      <div id="keywordGroups">
+        {% for g in groups %}
+        <details class="kwgroup">
+          <summary>{{ g.name }} <span class="muted">({{ g.keywords|length }} 个词)</span></summary>
+          <div class="kwlist">
+            {% for k in g.keywords %}
+            <div class="kwrow">
+              <label class="switch">
+                <input type="checkbox" class="kw-toggle" data-group="{{ g.id }}" data-kw="{{ k.keyword }}" {% if k.enabled %}checked{% endif %}>
+                <span class="kwtext">{{ k.keyword }}</span>
+              </label>
+              <button class="xbtn kw-del" data-kw="{{ k.keyword }}" title="删除">×</button>
+            </div>
+            {% endfor %}
+            <div class="kwadd">
+              <input type="text" class="kw-input" data-group="{{ g.id }}" placeholder="加一个词，比如 DDR5 6400 32G">
+              <button class="ghost-btn tiny kw-add" data-group="{{ g.id }}">加入</button>
+            </div>
+          </div>
+        </details>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <!-- 右：结果 -->
+  <section class="col-right">
+    <div class="panel result-panel">
+      <div class="panel-head">
+        <h2>实时比价结果</h2>
+        <div class="viewswitch">
+          <button class="vbtn active" data-view="spec">分类比价</button>
+          <button class="vbtn" data-view="list">商品明细</button>
+          <button class="vbtn" data-view="review">异常清单</button>
+          <button class="vbtn" data-view="rejected">已剔除</button>
+        </div>
+        <div class="filters">
+          <select id="filterGroup">
+            <option value="">全部分类</option>
+            {% for g in groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}
+          </select>
+          <select id="filterPlatform">
+            <option value="">全部平台</option>
+            {% for p in platforms %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+          </select>
+          <input type="search" id="searchBox" placeholder="搜标题 / 店铺…">
+          <select id="filterCond">
+            <option value="">全部成色</option>
+            <option value="new" selected>仅一手</option>
+            <option value="used">仅二手</option>
+          </select>
+          <label class="chk-toggle" title="也显示被标记为价格异常的条目">
+            <input type="checkbox" id="showReview">
+            <span>含异常</span>
+          </label>
+          <span class="muted" id="resultCount">0 条</span>
+        </div>
+      </div>
+      <!-- 分类比价视图：每个规格一行，直接看到最低价和差价 -->
+      <div class="table-wrap" id="specWrap" hidden>
+        <table class="rtable spectable">
+          <thead>
+            <tr>
+              <th>规格分类</th>
+              <th style="width:88px" class="num">最低价</th>
+              <th style="width:88px" class="num">最高价</th>
+              <th style="width:78px" class="num">差价</th>
+              <th style="width:60px" class="num">件数</th>
+              <th style="width:100px">最低价平台</th>
+              <th>最低价商品</th>
+            </tr>
+          </thead>
+          <tbody id="specBody">
+            <tr><td colspan="7" class="empty">还没有数据</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 异常清单：价格过于离谱的单独列出 -->
+      <div class="table-wrap" id="reviewWrap" hidden>
+        <table class="rtable">
+          <thead>
+            <tr>
+              <th>商品</th><th style="width:96px">平台</th><th style="width:96px" class="num">价格</th>
+              <th style="width:110px">规格</th><th>异常原因</th>
+            </tr>
+          </thead>
+          <tbody id="reviewBody"><tr><td colspan="5" class="empty">还没有异常条目</td></tr></tbody>
+        </table>
+      </div>
+
+      <!-- 已剔除：可疑商品的留档 -->
+      <div class="table-wrap" id="rejectedWrap" hidden>
+        <table class="rtable">
+          <thead>
+            <tr>
+              <th style="width:80px">平台</th><th style="width:90px" class="num">价格</th>
+              <th>标题</th><th style="width:110px">店铺</th><th>剔除原因</th>
+            </tr>
+          </thead>
+          <tbody id="rejectedBody"><tr><td colspan="5" class="empty">还没有剔除记录</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="table-wrap" id="listWrap">
+        <table class="rtable">
+          <thead>
+            <tr>
+              <th style="width:34px">#</th>
+              <th>商品</th>
+              <th style="width:96px">平台</th>
+              <th style="width:100px" class="num">现价</th>
+              <th style="width:110px" class="num">历史最低</th>
+              <th style="width:92px">店铺</th>
+              <th style="width:66px">成色</th>
+              <th style="width:96px">规格</th>
+              <th style="width:112px">采集时间</th>
+            </tr>
+          </thead>
+          <tbody id="resultBody">
+            <tr><td colspan="9" class="empty">还没有数据，先在左边点「开始采集」</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="result-foot">
+        <span class="muted">绿色 = 当前价等于历史最低；点击商品标题打开原网页</span>
+        <span class="muted">最近采集：<span id="lastRunInfo">—</span></span>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- SKU 明细弹层 -->
+<div class="modal" id="skuModal" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3 id="skuTitle">商品规格</h3>
+      <button class="xbtn" id="skuClose">×</button>
+    </div>
+    <div class="modal-sub" id="skuSub">正在读取商品详情…</div>
+    <div class="modal-body">
+      <table class="rtable skutable">
+        <thead><tr><th>规格</th><th style="width:96px" class="num">价格</th><th style="width:80px">价签</th></tr></thead>
+        <tbody id="skuBody"><tr><td colspan="3" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  window.__CONFIG__ = {
+    dbPath: {{ db_path|tojson }},
+    platforms: {{ platforms|tojson }},
+  };
+</script>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

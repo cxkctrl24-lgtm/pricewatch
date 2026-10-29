@@ -1,0 +1,19 @@
+# 数据与登录态（绝不外传）
+data/
+logs/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp

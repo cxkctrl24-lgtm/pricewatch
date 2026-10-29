@@ -1,0 +1,142 @@
+# -*- coding: utf-8 -*-
+"""全局配置：想改关键词/价格区间/采集深度，只改这里。"""
+import os
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+PROFILE_DIR = os.path.join(DATA_DIR, "profiles")   # 每个平台的浏览器登录态都在这里
+DB_PATH = os.path.join(DATA_DIR, "pricewatch.db")
+CONFIG_JSON = os.path.join(DATA_DIR, "settings.json")
+
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(PROFILE_DIR, exist_ok=True)
+
+HOST = "127.0.0.1"
+PORT = 8765
+
+# 采集时是否静默运行（登录窗口永远可见）。调试时可用 PW_HEADLESS=1 关掉弹窗。
+HEADLESS = os.environ.get("PW_HEADLESS", "0") == "1"
+
+# ============ 搜索的词 ============
+# price 是"看起来像这个配件的价格"区间，用来过滤掉不相关商品（比如 DDR5 搜到的 DDR4、机箱配件）
+KEYWORD_GROUPS = [
+    {
+        "id": "ddr5",
+        "name": "DDR5 内存",
+        "keywords": ["DDR5 内存条 16G", "DDR5 内存条 32G", "DDR5 6000 16G*2"],
+        "price": (120, 6000),
+    },
+    {
+        "id": "ddr4",
+        "name": "DDR4 内存",
+        "keywords": ["DDR4 内存条 8G", "DDR4 内存条 16G", "DDR4 3200 16G*2"],
+        "price": (40, 3000),
+    },
+    {
+        "id": "rtx50",
+        "name": "RTX 50 系显卡",
+        "keywords": ["RTX 5060", "RTX 5070", "RTX 5070Ti", "RTX 5080", "RTX 5090"],
+        "price": (1200, 60000),
+    },
+]
+
+# ============ 平台 ============
+PLATFORMS = {
+    "taobao": {
+        "home_url": "https://www.taobao.com/",
+        "name": "淘宝",
+        "login_url": "https://login.taobao.com/member/login.jhtml",
+        "login_mode": "qrcode",
+        "login_hint": "手机淘宝扫窗口里的二维码",
+        "check_url": "https://i.taobao.com/my_taobao.htm",
+        "search_url": "https://s.taobao.com/search?q={q}",
+        "item_url_match": ("item.taobao.com", "detail.tmall.com", "chaoshi.detail.tmall.com"),
+        "mobile": False,
+        # 每个选择器都是"候选列表"，按顺序试，第一个出结果的用
+        "selectors": {
+            "item": [
+                "div[class*='Card']",
+                "div[class*='doubleCard']",
+                "div[class*='item']",
+                ".item.J_MouserOnverReq",
+                "div[class*='itemWrapper']",
+            ],
+            "title": ["div[class*='title'] a", "a[class*='title']", "a[class*='Title']"],
+            "price": ["div[class*='priceInt']", "div[class*='price']", "span[class*='price']", "div[class*='Price']"],
+            "shop": ["div[class*='shopName']", "span[class*='shop']", "a[class*='shop']"],
+        },
+    },
+    "jd": {
+        "home_url": "https://www.jd.com/",
+        "name": "京东",
+        "login_url": "https://passport.jd.com/new/login.aspx",
+        "login_mode": "qrcode",
+        "login_hint": "京东 App 扫码，或用账号密码",
+        "check_url": "https://home.jd.com/",
+        "search_url": "https://search.jd.com/Search?keyword={q}&enc=utf-8",
+        "item_url_match": ("item.jd.com", "item.m.jd.com"),
+        "mobile": False,
+        "selectors": {
+            "item": ["li.gl-item", "div.gl-i-wrap", "li[class*='gl-item']"],
+            "title": ["div.p-name a em", "div.p-name a", "a[href*='item.jd.com']"],
+            "price": ["div.p-price i", "div.p-price strong", "i[class*='price']", "em[class*='price']"],
+            "shop": ["div.p-shop a", "div.p-shop span", "a[class*='shop']"],
+        },
+    },
+    "pdd": {
+        "home_url": "https://mobile.yangkeduo.com/",
+        "name": "拼多多",
+        # 拼多多网页端只有手机号+验证码，没有扫码；用桌面版页面更好操作
+        "login_url": "https://mobile.yangkeduo.com/login.html",
+        "login_hint": "拼多多网页版没有扫码 —— 只能填手机号收验证码",
+        "login_mode": "sms",
+        "check_url": "https://mobile.yangkeduo.com/personal.html",
+        "search_url": "https://mobile.yangkeduo.com/search_result.html?search_key={q}",
+        "item_url_match": ("mobile.yangkeduo.com/goods.html", "yangkeduo.com/goods"),
+        "mobile": True,
+        "selectors": {
+            "item": [
+                "div[class*='goods']",
+                "a[href*='goods.html']",
+                "div[class*='item']",
+            ],
+            "title": ["div[class*='title']", "div[class*='name']", "span[class*='title']"],
+            "price": ["div[class*='price']", "span[class*='price']", "div[class*='Price']"],
+            "shop": ["div[class*='mall']", "span[class*='shop']", "div[class*='store']"],
+        },
+    },
+}
+
+# 采集深度
+SCROLL_TIMES = 12          # 结果页往下滚多少次（懒加载更多商品）
+SCROLL_REST_EVERY = 3      # 每滚这么多次，多停一下（模拟看一会儿再继续）
+
+# ---------- 温和模式：把节奏压到最像真人的程度 ----------
+GENTLE = True                    # 总开关，关掉就是原来的快跑模式
+GENTLE_HOME_PAUSE = (2000, 3600)   # 进站后先在首页待这么久再搜索（毫秒）
+GENTLE_KW_GAP = (3.0, 7.0)         # 两个关键词之间（秒）
+GENTLE_PLATFORM_GAP = (6.0, 13.0)  # 两个平台之间（秒）
+GENTLE_SCROLL_PAUSE = (1.0, 2.6)   # 每次滚动之间（秒）
+GENTLE_REST_LONG = (3.0, 6.0)      # 滚动中途的长停顿（秒）
+
+# 被平台限流（"访问频繁"）后冷却多久再继续。京东对这个特别敏感。
+RATE_LIMIT_COOLDOWN = 600      # 秒，10 分钟
+MAX_ITEMS_PER_KEYWORD = 200
+PAGE_TIMEOUT_MS = 45000
+NAV_TIMEOUT_MS = 35000
+
+# 每日自动采集（本机时区）
+SCHEDULE_ENABLED = True
+SCHEDULE_TIME = "21:40"    # HH:MM，晚上跑避开平台日间的风控巡检高峰
+SCHEDULE_PLATFORMS = ["taobao", "jd", "pdd"]
+
+# 桌面窗口尺寸
+DESKTOP_VIEWPORT = {"width": 1440, "height": 900}
+MOBILE_VIEWPORT = {"width": 420, "height": 900}
+
+DESKTOP_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 "
+             "(KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
