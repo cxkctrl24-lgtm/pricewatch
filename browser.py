@@ -116,10 +116,10 @@ def _kill_profile_holders(user_data_dir):
     return killed
 
 
-def _browser_kwargs(platform, headless):
+def _browser_kwargs(platform, headless, profile_dir=None):
     cfg = config.PLATFORMS[platform]
     return dict(
-        user_data_dir=profile_path(platform),
+        user_data_dir=profile_dir or profile_path(platform),
         headless=headless,
         locale="zh-CN",
         timezone_id="Asia/Shanghai",
@@ -133,7 +133,7 @@ def _browser_kwargs(platform, headless):
 class Session:
     """一次完整的浏览器会话。只能在创建它的线程里使用，用 with 保证释放。"""
 
-    def __init__(self, platform, headless=None):
+    def __init__(self, platform, headless=None, profile_dir=None):
         self.platform = platform
         self.cfg = config.PLATFORMS[platform]
         self.headless = config.HEADLESS if headless is None else headless
@@ -141,11 +141,15 @@ class Session:
         self.ctx = None
         self.home_visited = False   # 温和模式用：本会话是否已在站内首页待过
         self._pid = threading.get_ident()
+        # profile_dir 非空时用这个目录（而不是 data/profiles/<platform>）。
+        # 用途：详情页补读在独立线程里跑，必须用**独立 profile**，
+        # 否则会跟主采集线程抢同一个 Chromium 单实例锁，直接打架。
+        self.profile_dir = profile_dir
 
     # ---- 生命周期 ----
     def __enter__(self):
         self.pw = sync_playwright().start()
-        kw = _browser_kwargs(self.platform, self.headless)
+        kw = _browser_kwargs(self.platform, self.headless, self.profile_dir)
         try:
             self.ctx = self._launch(kw)
         except Exception as first_err:

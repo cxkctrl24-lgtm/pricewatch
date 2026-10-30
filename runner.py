@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 
-from . import classify, config, cooldown, db, fakefilter, outlier
+from . import classify, config, cooldown, db, fakefilter, outlier, sku_cache
 from .browser import Session, bm
 from .scrapers import collector
 
@@ -112,6 +112,102 @@ def _prepare_groups(group_ids):
     return [g for g in groups if g["enabled_keywords"]]
 
 
+def _fetch_detail_with_deadline(session, platform, url, timeout_ms, platform_name="平台"):
+    """在独立线程里读详情页，超过 (timeout_ms + 安全余量) 就放弃。
+
+    返回 payload dict 或 None。
+
+    为什么要线程：淘宝详情页被风控挂起时，Playwright 的 page.goto 不按
+    timeout 参数返回（实测卡 430 秒），主线程调用会把整轮采集拖死。
+    用 daemon 线程 + join 超时，到点就放弃这一次读取继续往下走；
+    被遗弃的线程拿不到结果，但它结束时会把 session 关掉，不会泄漏到主流程。
+
+    注意：这里**新建一个 Session**给子线程用，不复用主采集线程的 session ——
+    Playwright 对象绑定创建它的线程，跨线程用会直接报 "Playwright connection closed"。
+    **但绝不能用同一个 profile 目录**：子线程开浏览器会跟主采集线程抢
+    Chromium 单实例锁，实测直接打架（"已清理 9 个占用该 profile 的残留浏览器进程"，
+    然后主线程的采集被顶掉、整轮卡死）。这里建一个临时 profile，
+    用完就删 —— 详情页只看价格，不需要主 profile 里的登录 cookie 以外的状态。
+    """
+    import os
+    import shutil
+    import tempfile
+    import threading
+
+    from . import config as _cfg
+    from .browser import Session
+    from .scrapers import detail as detail_mod
+
+    deadline = (int(timeout_ms) + 8000) / 1000.0      # 给 8 秒收尾余量
+    box = {"payload": None, "err": None}
+
+    # 临时 profile 目录（放在包内 tmp 下，规避系统 Temp 的 EPERM）
+    tmp_profile = None
+    try:
+        base_tmp = os.path.join(_cfg.BASE_DIR, "tmp")
+        os.makedirs(base_tmp, exist_ok=True)
+        tmp_profile = tempfile.mkdtemp(prefix=f"skuprofile-{platform}-", dir=base_tmp)
+    except Exception:
+        tmp_profile = None
+
+    def _worker():
+        s2 = None
+        try:
+            if tmp_profile:
+                s2 = Session(platform, headless=True, profile_dir=tmp_profile).__enter__()
+                # 关键：临时 profile 是全新的，**没有登录 cookie**。
+                # 淘宝/京东详情页要登录才能看完整 SKU，所以把主 profile 的
+                # cookie 复制过来（只复制 cookie，不共享目录 —— 共享目录会抢锁）。
+                try:
+                    for c in session.ctx.cookies():
+                        try:
+                            s2.ctx.add_cookies([{
+                                "name": c.get("name"),
+                                "value": c.get("value"),
+                                "domain": c.get("domain"),
+                                "path": c.get("path") or "/",
+                            }])
+                        except Exception:
+                            continue
+                except Exception as e:
+                    db.log("warn", f"[SKU校正] 复制登录 cookie 失败: {str(e)[:80]}")
+            else:
+                s2 = Session(platform, headless=True).__enter__()
+            _st, _msg, payload = detail_mod.fetch_sku_prices(
+                s2, platform, url, timeout_ms=timeout_ms)
+            box["payload"] = payload or {}
+        except Exception as e:
+            box["err"] = str(e)[:120]
+        finally:
+            try:
+                if s2 is not None:
+                    s2.close()
+            except Exception:
+                pass
+
+    th = threading.Thread(target=_worker, daemon=True,
+                          name=f"sku-detail-{platform}")
+    th.start()
+    th.join(timeout=deadline)
+    alive = th.is_alive()
+    if alive:
+        db.log("warn", f"[SKU校正] {platform_name}详情页超过 {int(deadline)} 秒仍无响应，放弃本次读取")
+    if not alive and box["err"]:
+        db.log("warn", f"[SKU校正] 详情页读取异常: {box['err'][:90]}")
+    elif box["err"] and alive:
+        db.log("warn", f"[SKU校正] 详情页读取异常(已放弃线程): {box['err'][:80]}")
+
+    # 清理临时 profile（线程还活着时不动它，避免删正在用的目录）
+    if tmp_profile and not alive:
+        try:
+            shutil.rmtree(tmp_profile, ignore_errors=True)
+        except Exception:
+            pass
+    if alive:
+        return None
+    return box["payload"]
+
+
 def _reprice_multi_spec(session, platform, items, group, task):
     """对「多容量 / 跨代」的商品补读详情页，用 SKU 真实价重定这一条。
 
@@ -182,36 +278,58 @@ def _reprice_multi_spec(session, platform, items, group, task):
 
     fixed = 0
     tried = 0
+    cache_hit = 0
     from .scrapers import detail as detail_mod
     for it in candidates:
         # 用户点了取消就立刻收手 —— 详情页一轮要跑几十秒，
         # 不检查的话「取消」看起来要等一整轮才生效。
         if _is_cancelled(task):
-            log("info", "[SKU校正] 收到取消，停止补读详情页")
+            db.log("info", "[SKU校正] 收到取消，停止补读详情页")
             break
         # 总时间预算：详情页可能被风控卡到超时，不能让一件商品
         # 把整轮采集拖住。超预算就直接收手，用列表价。
         if time.time() - started > budget:
-            log("info", f"[SKU校正] 已用满 {int(budget)} 秒预算，剩下的下一轮再校正")
+            db.log("info", f"[SKU校正] 已用满 {int(budget)} 秒预算，剩下的下一轮再校正")
             break
         url = it.get("url") or ""
         if not url:
             continue
-        tried += 1
-        try:
-            _st, _msg, payload = detail_mod.fetch_sku_prices(
-                session, platform, url, timeout_ms=detail_timeout)
-        except Exception as e:
-            log("warn", f"[SKU校正] 详情页读取失败，保留列表价: {str(e)[:90]}")
-            continue
-        skus = (payload or {}).get("sku_prices") or []
+        ikey = sku_cache.item_key_of(url)
+
+        # 先查缓存：同一件商品 45 分钟内的 SKU 表基本不变，
+        # 命中就完全不用开详情页（这正是详情页挂起问题的根治办法）。
+        skus = sku_cache.get(platform, ikey)
+        if skus:
+            cache_hit += 1
+            db.log("info", f"[SKU校正] 命中缓存，跳过详情页: {it.get('title', '')[:24]}")
+        else:
+            tried += 1
+            # 详情页读取放进**独立线程**跑，外面套一个硬超时。
+            # 为什么必须这么做：淘宝详情页被风控时会挂起，Playwright 的
+            # page.goto 即使传了 timeout 也不按它返回（实测卡 430 秒）。
+            # 主线程直接调它 = 整轮采集被一件事拖死。
+            # 放到 daemon 线程里，join 到点就放弃这个线程继续往下走 ——
+            # 卡住的线程拿不到结果也不会影响主流程（进程退出时自动清理）。
+            payload = _fetch_detail_with_deadline(
+                session, platform, url, detail_timeout,
+                platform_name=config.PLATFORMS.get(platform, {}).get("name", platform))
+            if payload is None:
+                db.log("warn", f"[SKU校正] 详情页超时/失败，保留列表价: {it.get('title', '')[:22]}")
+                continue
+            skus = (payload or {}).get("sku_prices") or []
+            if skus:
+                # 被风控的页面 SKU 可能不完整 → put() 内部会拒绝写入
+                blocked = bool((payload or {}).get("blocked"))
+                if not sku_cache.put(platform, ikey, skus,
+                                     title=it.get("title") or "", blocked=blocked):
+                    db.log("info", "[SKU校正] 页面疑似被风控，不缓存这份 SKU")
         if not skus:
             continue
         try:
             by_cat, _skipped = repricing.reprice_from_skus(it.get("title"), skus)
             key, info = repricing.best_for_group(by_cat, gid)
         except Exception as e:
-            log("warn", f"[SKU校正] 归类失败，保留列表价: {str(e)[:90]}")
+            db.log("warn", f"[SKU校正] 归类失败，保留列表价: {str(e)[:90]}")
             continue
         if not key or not info:
             continue
@@ -239,17 +357,23 @@ def _reprice_multi_spec(session, platform, items, group, task):
         it["_reprice_note"] = (f"列表价 ¥{old_price:.0f} 对应的是其他规格档；"
                                f"本档真实价 ¥{new_price:.0f}（{info.get('sku', '')[:26]}）")
         fixed += 1
-        log("info", f"[SKU校正] {it.get('title', '')[:26]}… "
+        db.log("info", f"[SKU校正] {it.get('title', '')[:26]}… "
                     f"¥{old_price:.0f} → ¥{new_price:.0f}（{key}）")
         if _sleep_unless_cancelled(
                 random.uniform(*getattr(config, "SKU_REPRICE_GAP", (3.0, 6.0))), task):
-            log("info", "[SKU校正] 收到取消，停止补读详情页")
+            db.log("info", "[SKU校正] 收到取消，停止补读详情页")
             break
 
-    if tried and task is not None:
-        _msg(task, "info",
-             f"[SKU校正] 本轮试读 {tried} 件详情页，修正 {fixed} 件价格档位"
-             f"（用时 {int(time.time() - started)} 秒）")
+    if tried or cache_hit:
+        bits = []
+        if cache_hit:
+            bits.append(f"缓存命中 {cache_hit}")
+        if tried:
+            bits.append(f"实读 {tried}")
+        if task is not None:
+            _msg(task, "info",
+                 f"[SKU校正] {'，'.join(bits)} 件，修正 {fixed} 件价格档位"
+                 f"（用时 {int(time.time() - started)} 秒）")
     return fixed
 
 

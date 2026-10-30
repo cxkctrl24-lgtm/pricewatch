@@ -161,12 +161,12 @@ NAV_TIMEOUT_MS = 35000
 # 一件商品挂多个 SKU（横跨 DDR3/DDR4、4G~32G）时，列表页只暴露最低那个价。
 # 拿它配标题分类会把「4G DDR3 ¥69」算成「DDR4 8G 最低价」（实测踩过）。
 #
-# ⚠ 默认关闭。原因：实测淘宝详情页在批量访问下会挂起 —— Playwright 的
-#   page.goto 即使设了 15 秒超时也会长时间不返回，一轮采集能被拖到 10 分钟以上。
-#   逻辑本身（repricing.py）已验证正确，但网络侧不可控。
-#   需要精度提升时再打开，并配合下面的预算/上限；或直接用界面上的「看规格」逐条看。
-SKU_REPRICE = False
-# 每次采集最多补读几件详情页
+# 淘宝详情页在批量访问下会挂起（page.goto 超时都不按设定返回，实测卡 430 秒），
+# 所以上一版默认关闭。现在配了 sku_cache（同一件商品 45 分钟内只读一次详情页），
+# 二次访问直接命中缓存、完全不开页面，反复触发风控的问题被消掉 —— 重新开启。
+# 若你的网络环境下详情页仍然拖慢采集，把它改回 False 即可。
+SKU_REPRICE = True
+# 每次采集最多补读几件详情页（缓存命中不计入这个数）
 SKU_REPRICE_MAX_PER_KEYWORD = 8
 # 每个关键词的校正**总时间预算**（秒）。超了就直接收手用列表价。
 SKU_REPRICE_BUDGET = 90
@@ -176,8 +176,44 @@ SKU_DETAIL_TIMEOUT_MS = 15000
 SKU_REPRICE_GAP = (2.0, 3.5)
 
 
+# 节奏自适应：被限流过就自动放慢，采顺了再逐步恢复。
+# hits 来自 cooldown.json 的连续限流次数（1 次 → ×1.5，2 次 → ×2.5，3 次 → ×4）。
+# 只有采成一次（cooldown.clear）才会清零 hits，所以放慢是"记住教训"的。
+PACING_BOOST = {
+    0: 1.0,      # 没被限过，正常速度
+    1: 1.5,
+    2: 2.5,
+    3: 4.0,
+}
+
+
+def _boost_for(hits):
+    """按连续限流次数取放慢系数（超过 3 次按 4 倍封顶）。"""
+    try:
+        h = int(hits or 0)
+    except Exception:
+        h = 0
+    if h <= 0:
+        return 1.0
+    return PACING_BOOST.get(h, PACING_BOOST[max(PACING_BOOST)])
+
+
+def _scale_range(rng, k):
+    """把一个 (最小, 最大) 区间按系数 k 放大。"""
+    try:
+        lo, hi = rng
+    except Exception:
+        return rng
+    return (float(lo) * k, float(hi) * k)
+
+
 def pacing(platform):
-    """取该平台的节奏参数，缺项回落到全局温和模式默认值。"""
+    """取该平台的节奏参数，缺项回落到全局温和模式默认值。
+
+    **会被限流历史自动放慢**：读取 cooldown.json 里该平台的连续被限次数，
+    按 PACING_BOOST 放大所有等待区间（关键词间隔、滚动停顿、首页预热、
+    平台间歇、冷却时长）。采成一次 cooldown.clear 后自动回到正常速度。
+    """
     base = {
         "scroll_times": SCROLL_TIMES,
         "kw_gap": GENTLE_KW_GAP,
@@ -185,8 +221,23 @@ def pacing(platform):
         "rest_long": GENTLE_REST_LONG,
         "home_pause": GENTLE_HOME_PAUSE,
         "cooldown": RATE_LIMIT_COOLDOWN,
+        "boost": 1.0,
     }
     base.update(PLATFORM_PACING.get(platform, {}))
+
+    # 读取限流历史（延迟导入，避免 config ←→ cooldown 循环依赖）
+    try:
+        from . import cooldown
+        k = _boost_for(cooldown.hits(platform))
+    except Exception:
+        k = 1.0
+    if k > 1.0:
+        base["boost"] = k
+        for key in ("kw_gap", "scroll_pause", "rest_long", "home_pause"):
+            if base.get(key):
+                base[key] = _scale_range(base[key], k)
+        base["scroll_times"] = max(3, int(base.get("scroll_times", SCROLL_TIMES) / min(k, 2.0)))
+        base["cooldown"] = float(base.get("cooldown") or RATE_LIMIT_COOLDOWN) * k
     return base
 
 # 每日自动采集（本机时区）
