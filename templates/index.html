@@ -19,6 +19,9 @@
   <div class="top-right">
     <span class="chip" id="schedChip">每日 {{ schedule_time }} 自动采集</span>
     {% if gentle %}<span class="chip chip-gentle" id="gentleChip" title="慢速拟真：进站先逛首页、滚动随机停顿、关键词之间歇 3–7 秒">🛡 温和模式</span>{% endif %}
+    <button class="theme-btn" id="themeBtn" title="切换日间 / 夜间主题">
+      <span class="ico" id="themeIco">🌤</span><span id="themeLabel">日间</span>
+    </button>
     <a class="ghost-btn" href="/api/export.csv">导出 CSV</a>
     <span class="dot" id="aliveDot"></span>
   </div>
@@ -119,6 +122,7 @@
         <h2>实时比价结果</h2>
         <div class="viewswitch">
           <button class="vbtn active" data-view="spec">分类比价</button>
+          <button class="vbtn" data-view="curve">价格曲线</button>
           <button class="vbtn" data-view="list">商品明细</button>
           <button class="vbtn" data-view="review">异常清单</button>
           <button class="vbtn" data-view="rejected">已剔除</button>
@@ -163,6 +167,28 @@
             <tr><td colspan="7" class="empty">还没有数据</td></tr>
           </tbody>
         </table>
+      </div>
+
+      <!-- 价格曲线：按规格分类画历史最低价走势 -->
+      <div class="curve-wrap" id="curveWrap" hidden>
+        <div class="curve-toolbar">
+          <span class="muted">时间粒度</span>
+          <div class="seg" id="curveRange">
+            <button data-days="" class="active">全部</button>
+            <button data-days="1">近 1 天</button>
+            <button data-days="7">近 7 天</button>
+            <button data-days="30">近 30 天</button>
+          </div>
+          <span class="curve-stat" id="curveStat">—</span>
+        </div>
+        <div class="curve-chart">
+          <div class="curve-canvas" id="curveCanvas">
+            <div class="curve-empty">正在加载曲线…</div>
+          </div>
+          <div class="curve-legend" id="curveLegend">
+            <h4>选择要画的分类</h4>
+          </div>
+        </div>
       </div>
 
       <!-- 异常清单：价格过于离谱的单独列出 -->

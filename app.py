@@ -192,6 +192,39 @@ def api_history(product_id):
     return jsonify({"ok": True, "history": db.price_history(product_id)})
 
 
+@app.route("/api/curve")
+def api_curve():
+    """价格曲线：按规格分类聚合历史最低价。
+
+    参数：
+      spec=分类键（可重复 / 逗号分隔），不传就是全部
+      platform / group / condition  与列表页同一套筛选
+      level=all 时把"异常"条目也算进去（默认 ok）
+      days=只看最近 N 天
+    """
+    raw = request.args.getlist("spec")
+    keys = []
+    for item in raw:
+        keys.extend([x.strip() for x in item.split(",") if x.strip()])
+    level = request.args.get("level") or "ok"
+    days = request.args.get("days")
+    try:
+        days = float(days) if days else None
+    except ValueError:
+        days = None
+    data = db.curve_series(
+        spec_keys=keys or None,
+        platform=request.args.get("platform") or None,
+        group=request.args.get("group") or None,
+        condition=request.args.get("condition") or None,
+        only_ok=(level == "ok"),
+        days=days,
+    )
+    data["ok"] = True
+    data["span"] = db.curve_span()
+    return jsonify(data)
+
+
 @app.route("/api/keywords", methods=["GET", "POST", "DELETE"])
 def api_keywords():
     if request.method == "GET":

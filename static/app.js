@@ -296,6 +296,7 @@ $$(".vbtn").forEach(b => b.addEventListener("click", () => {
   viewMode = b.dataset.view;
   applyView();
   if (viewMode === "spec") renderSpecs();
+  else if (viewMode === "curve") refreshCurve();
   else if (viewMode === "list") renderTable();
 }));
 
@@ -336,7 +337,7 @@ function renderSpecs() {
 }
 
 $("#filterGroup").addEventListener("change", e => { filters.group = e.target.value; renderSpecs(); renderTable(); });
-$("#filterPlatform").addEventListener("change", e => { filters.platform = e.target.value; renderSpecs(); renderTable(); });
+$("#filterPlatform").addEventListener("change", e => { filters.platform = e.target.value; renderSpecs(); renderTable(); refreshCurve(); });
 $("#searchBox").addEventListener("input", e => { filters.q = e.target.value.trim(); renderSpecs(); renderTable(); });
 $("#showReview").addEventListener("change", e => {
   filters.showReview = e.target.checked;
@@ -345,6 +346,266 @@ $("#showReview").addEventListener("change", e => {
 $("#filterCond").addEventListener("change", e => {
   filters.condition = e.target.value;
   refreshItems().then(() => refreshSpecs());
+});
+
+/* ---------- 主题切换（日间 / 夜间） ---------- */
+const THEME_KEY = "pricewatch-theme";
+const THEMES = {
+  day:   { ico: "🌤", label: "日间" },
+  night: { ico: "🌙", label: "夜间" },
+};
+
+function applyTheme(name) {
+  const t = THEMES[name] ? name : "day";
+  document.documentElement.setAttribute("data-theme", t);
+  try { localStorage.setItem(THEME_KEY, t); } catch (e) {}
+  const btn = $("#themeBtn");
+  if (btn) {
+    $("#themeIco").textContent = THEMES[t].ico;
+    $("#themeLabel").textContent = THEMES[t].label;
+    btn.title = t === "day" ? "当前日间，点击切到夜间" : "当前夜间，点击切到日间";
+  }
+  // 曲线用 CSS 变量上色，主题变了要重画才能拿到新颜色
+  if (viewMode === "curve") renderCurve();
+}
+
+function initTheme() {
+  let saved = null;
+  try { saved = localStorage.getItem(THEME_KEY); } catch (e) {}
+  if (!saved) {
+    // 没选过就按时段自动：白天日间，晚上夜间
+    const h = new Date().getHours();
+    saved = (h >= 7 && h < 19) ? "day" : "night";
+  }
+  applyTheme(saved);
+  const btn = $("#themeBtn");
+  if (btn) btn.addEventListener("click", () => {
+    const cur = document.documentElement.getAttribute("data-theme") === "night" ? "night" : "day";
+    applyTheme(cur === "day" ? "night" : "day");
+  });
+}
+
+/* ---------- 价格曲线 ---------- */
+// 分类一多曲线就是一团乱麻，默认只画前 N 条（按最低价升序，最便宜的规格最有用）
+const CURVE_DEFAULT = 8;
+const CURVE_MAX = 16;
+// 线色：日间/夜间都不刺眼，且能区分相邻两条
+const CURVE_COLORS = [
+  "#0d9488", "#2563eb", "#e08a00", "#be123c", "#7c3aed",
+  "#0891b2", "#65a30d", "#c2410c", "#4f46e5", "#059669",
+  "#db2777", "#0369a1", "#a16207", "#9333ea", "#dc2626", "#15803d",
+];
+
+let curveData = null;      // /api/curve 的原始返回
+let curveDays = "";        // 时间范围（空=全部）
+let curvePicked = null;    // 选中的分类集合；null = 用默认前 N 条
+
+async function refreshCurve() {
+  const p = filters.platform ? `&platform=${encodeURIComponent(filters.platform)}` : "";
+  const g = filters.group ? `&group=${encodeURIComponent(filters.group)}` : "";
+  const c = filters.condition ? `&condition=${encodeURIComponent(filters.condition)}` : "";
+  const lvl = filters.showReview ? "all" : "ok";
+  const d = curveDays ? `&days=${curveDays}` : "";
+  const r = await api(`/api/curve?level=${lvl}${p}${g}${c}${d}`);
+  if (!r.ok) return;
+  curveData = r;
+  if (curvePicked) {
+    // 换了筛选条件后，把已经不存在于结果里的分类剔掉
+    const alive = new Set((r.series || []).map(s => s.spec_key));
+    curvePicked = new Set([...curvePicked].filter(k => alive.has(k)));
+    if (!curvePicked.size) curvePicked = null;
+  }
+  renderCurve();
+}
+
+function curveSeriesShown() {
+  const all = (curveData && curveData.series) || [];
+  if (curvePicked && curvePicked.size) {
+    return all.filter(s => curvePicked.has(s.spec_key)).slice(0, CURVE_MAX);
+  }
+  return all.slice(0, CURVE_DEFAULT);
+}
+
+function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+function renderCurve() {
+  const canvas = $("#curveCanvas");
+  const legend = $("#curveLegend");
+  if (!canvas || !legend) return;
+
+  const d = curveData;
+  const pts = (d && d.points) || [];
+  const shown = curveSeriesShown();
+
+  // --- 统计条 ---
+  const span = (d && d.span) || {};
+  const stat = $("#curveStat");
+  if (stat) {
+    if (!d || !pts.length) {
+      stat.textContent = span.points
+        ? `${span.points} 个历史价格点，但当前筛选下没有可画的分类`
+        : "还没有历史数据 —— 先采集几次，曲线才有得画";
+    } else {
+      const s0 = span.start ? new Date(span.start * 1000) : null;
+      const s1 = span.end ? new Date(span.end * 1000) : null;
+      const fmt = x => x ? `${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")} ${String(x.getHours()).padStart(2, "0")}:${String(x.getMinutes()).padStart(2, "0")}` : "—";
+      stat.textContent = `${pts.length} 个时间点 · 粒度 ${d.unit} · 覆盖 ${fmt(s0)} → ${fmt(s1)}`;
+    }
+  }
+
+  // --- 图例 ---
+  const allSeries = (d && d.series) || [];
+  if (!allSeries.length) {
+    legend.innerHTML = `<h4>选择要画的分类</h4><div class="curve-empty" style="min-height:120px">暂无分类</div>`;
+  } else {
+    const pickedKeys = new Set(shown.map(s => s.spec_key));
+    legend.innerHTML = `<h4>选择要画的分类（最多 ${CURVE_MAX} 条）</h4>` + allSeries.map(s => {
+      const idx = allSeries.indexOf(s);
+      const on = pickedKeys.has(s.spec_key);
+      const color = CURVE_COLORS[idx % CURVE_COLORS.length];
+      const first = s.points.find(v => v !== null);
+      const lastV = [...s.points].reverse().find(v => v !== null);
+      let delta = "";
+      if (first !== undefined && lastV !== undefined && first !== null && lastV !== null) {
+        const pct = first ? ((lastV - first) / first * 100) : 0;
+        const cls = pct > 0.5 ? "up" : pct < -0.5 ? "down" : "";
+        const sign = (pct > 0 ? "+" : "") + pct.toFixed(1) + "%";
+        const arrow = cls === "up" ? "▲" : cls === "down" ? "▼" : "＝";
+        delta = ` <span class="${cls}">${arrow}${sign}</span>`;
+      }
+      return `<label class="legend-row">
+        <input type="checkbox" data-spec="${esc(s.spec_key)}" ${on ? "checked" : ""}>
+        <span class="swatch" style="background:${color}"></span>
+        <span class="lname" title="${esc(s.spec_key)}">${esc(s.spec_key)}</span>
+        <span class="lval">¥${s.last}${delta}</span>
+      </label>`;
+    }).join("");
+    $$("#curveLegend input[type=checkbox]").forEach(box => {
+      box.addEventListener("change", () => {
+        const key = box.dataset.spec;
+        if (!curvePicked) curvePicked = new Set(shown.map(s => s.spec_key));
+        if (box.checked) {
+          if (curvePicked.size >= CURVE_MAX) { box.checked = false; return; }
+          curvePicked.add(key);
+        } else {
+          curvePicked.delete(key);
+        }
+        if (!curvePicked.size) curvePicked = null;
+        renderCurve();
+      });
+    });
+  }
+
+  // --- 画布 ---
+  if (!pts.length || !shown.length) {
+    canvas.innerHTML = `<div class="curve-empty">${
+      pts.length ? "左边图例里勾一个分类就能看到曲线" : "还没有历史数据<br>先点「开始采集」跑两轮以上"
+    }</div>`;
+    return;
+  }
+
+  const W = Math.max(canvas.clientWidth - 12, 320);
+  const H = 270;
+  const PAD = { l: 54, r: 14, t: 16, b: 26 };
+  const plotW = W - PAD.l - PAD.r;
+  const plotH = H - PAD.t - PAD.b;
+
+  // y 轴范围：取所有曲线值域，但用分位数剪掉极端离群值，
+  // 否则一条 ¥480 的孤点会把 ¥60~¥250 的主体全压成一条水平线
+  const vals = [];
+  shown.forEach(s => s.points.forEach(v => { if (v !== null) vals.push(v); }));
+  vals.sort((a, b) => a - b);
+  const q = p => vals[Math.min(vals.length - 1, Math.max(0, Math.floor(vals.length * p)))];
+  let yMin = vals.length >= 5 ? q(0.02) : Math.min(...vals);
+  let yMax = vals.length >= 5 ? q(0.98) : Math.max(...vals);
+  if (yMin === yMax) { yMin = Math.max(0, yMin * 0.9); yMax *= 1.1; }
+  const padY = (yMax - yMin) * 0.08;
+  yMin = Math.max(0, yMin - padY);
+  yMax = yMax + padY;
+
+  const n = pts.length;
+  // 只有 1 个点时把线居中，否则除以 0
+  const xAt = i => PAD.l + (n === 1 ? plotW / 2 : plotW * i / (n - 1));
+  const yAt = v => PAD.t + plotH - (v - yMin) / (yMax - yMin) * plotH;
+
+  const gridColor = cssVar("--line", "#d7e2ea");
+  const textColor = cssVar("--muted", "#5d7a8c");
+  const accent = cssVar("--accent", "#0d9488");
+
+  // 横向网格 + y 轴刻度（5 条）
+  let ys = "";
+  const TICKS = 5;
+  for (let k = 0; k <= TICKS; k++) {
+    const v = yMin + (yMax - yMin) * k / TICKS;
+    const y = yAt(v);
+    ys += `<line x1="${PAD.l}" y1="${y.toFixed(1)}" x2="${W - PAD.r}" y2="${y.toFixed(1)}"
+             stroke="${gridColor}" stroke-width="1" stroke-dasharray="${k === 0 ? "0" : "3 4"}" opacity="${k === 0 ? 1 : .7}"/>`;
+    ys += `<text x="${PAD.l - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end"
+             fill="${textColor}" font-size="10.5" font-family="var(--mono)">${fmtPrice(v)}</text>`;
+  }
+
+  // x 轴标签：最多 7 个，避免挤成一坨
+  let xs = "";
+  const step = Math.max(1, Math.ceil(n / 7));
+  for (let i = 0; i < n; i += step) {
+    const x = xAt(i);
+    xs += `<text x="${x.toFixed(1)}" y="${H - 8}" text-anchor="middle"
+             fill="${textColor}" font-size="10.5">${esc(pts[i].label)}</text>`;
+  }
+
+  // 每条曲线：null 处断开（用 M 重新起步），所以分段画
+  let lines = "";
+  shown.forEach(s => {
+    const idx = allSeries.indexOf(s);
+    const color = CURVE_COLORS[idx % CURVE_COLORS.length];
+    let seg = [];
+    let path = "";
+    const flush = () => {
+      if (seg.length === 1) {
+        // 单点没线可画，补一个 2px 的小竖线让它至少可见
+        const x = xAt(seg[0][0]), y = yAt(seg[0][1]);
+        path += `<line x1="${x}" y1="${y - 2}" x2="${x}" y2="${y + 2}"
+                  stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>`;
+      } else if (seg.length > 1) {
+        path += `<polyline fill="none" stroke="${color}" stroke-width="2"
+                  stroke-linejoin="round" stroke-linecap="round"
+                  points="${seg.map(([i, v]) => `${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`).join(" ")}"/>`;
+      }
+      seg = [];
+    };
+    s.points.forEach((v, i) => {
+      if (v === null) { flush(); return; }
+      seg.push([i, v]);
+    });
+    flush();
+    // 端点圆点（最后一个有效点）
+    const lastIdx = s.points.reduce((acc, v, i) => (v !== null ? i : acc), -1);
+    if (lastIdx >= 0) {
+      const v = s.points[lastIdx];
+      path += `<circle cx="${xAt(lastIdx).toFixed(1)}" cy="${yAt(v).toFixed(1)}" r="3.2"
+                fill="${color}" stroke="var(--panel)" stroke-width="1.5">
+                <title>${esc(s.spec_key)} · ${fmtPrice(v)} · ${esc(pts[lastIdx].label)}</title>
+              </circle>`;
+    }
+    lines += path;
+  });
+
+  canvas.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet"
+      role="img" aria-label="各规格历史最低价曲线">
+    <rect x="${PAD.l}" y="${PAD.t}" width="${plotW}" height="${plotH}" fill="none"/>
+    ${ys}${xs}${lines}
+  </svg>`;
+}
+
+$("#curveRange").addEventListener("click", e => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  curveDays = b.dataset.days || "";
+  $$("#curveRange button").forEach(x => x.classList.toggle("active", x === b));
+  refreshCurve();
 });
 
 /* ---------- 关键词管理 ---------- */
@@ -399,6 +660,7 @@ function bindKeywordEvents() {
 function applyView() {
   $("#specWrap").hidden = viewMode !== "spec";
   $("#listWrap").hidden = viewMode !== "list";
+  $("#curveWrap").hidden = viewMode !== "curve";
   $("#reviewWrap").hidden = viewMode !== "review";
   $("#rejectedWrap").hidden = viewMode !== "rejected";
   $$(".vbtn").forEach(x => x.classList.toggle("active", x.dataset.view === viewMode));
@@ -407,11 +669,12 @@ function applyView() {
 }
 
 (async function boot() {
+  initTheme();
   applyView();
   await pollState();
   await refreshItems();
   await refreshSpecs();
   bindKeywordEvents();
   setInterval(pollState, 2000);
-  setInterval(() => { if (!state.task || state.task.status !== "running") { refreshItems(); refreshSpecs(); } }, 4000);
+  setInterval(() => { if (!state.task || state.task.status !== "running") { refreshItems(); refreshSpecs(); if (viewMode === "curve") refreshCurve(); } }, 4000);
 })();

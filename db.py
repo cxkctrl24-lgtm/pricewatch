@@ -352,6 +352,131 @@ def price_history(product_id, limit=200):
     return [dict(r) for r in rows]
 
 
+# ---------------- 价格曲线 ----------------
+# 时间桶（秒）。点太密的曲线看不出趋势，按跨度从小到大挑第一档够用的。
+CURVE_BUCKETS = (
+    (60, "分钟"),
+    (5 * 60, "5 分钟"),
+    (15 * 60, "15 分钟"),
+    (1 * 3600, "小时"),
+    (6 * 3600, "6 小时"),
+    (24 * 3600, "天"),
+    (3 * 24 * 3600, "3 天"),
+    (7 * 24 * 3600, "周"),
+    (30 * 24 * 3600, "月"),
+)
+
+
+def _pick_bucket(span_sec):
+    """按数据总跨度选一个合适的时间桶，返回 (桶秒数, 桶中文单位)。"""
+    for size, label in CURVE_BUCKETS:
+        if span_sec <= size * 40:      # 最多 40 个点，曲线不至于挤成一坨
+            return size, label
+    return CURVE_BUCKETS[-1]
+
+
+def curve_series(spec_keys=None, platform=None, group=None,
+                 condition=None, only_ok=True, days=None):
+    """按「规格分类」聚合历史价格曲线。
+
+    每个点是一次采集时间桶内该分类的**最低价**（比价看的就是最低成交价），
+    另外附带该桶内的样本数，点太稀疏时方便判断可信度。
+
+    返回 {
+      bucket: 桶秒数, unit: 桶单位, points: [{t, label}] 横轴,
+      series: [{spec_key, points: [v1, v2, ...], min, max, last, n}]
+    }
+    横轴是全局统一的，各分类共享同一根时间轴，才能横向对比。
+    """
+    with transaction() as c:
+        rows = c.execute("""
+            SELECT p.id, p.spec_key, p.platform, p.condition, p.price_level,
+                   h.price, h.ts
+            FROM price_history h
+            JOIN products p ON p.id = h.product_id
+            ORDER BY h.ts ASC
+        """).fetchall()
+
+    if not rows:
+        return {"bucket": 0, "unit": "", "points": [], "series": []}
+
+    keys = set(spec_keys) if spec_keys else None
+    now = time.time()
+    cutoff = now - days * 86400 if days else None
+
+    # 先按分类归集 (ts, price)，顺手统计该分类的组信息
+    per_spec = {}
+    meta = {}
+    for r in rows:
+        sk = r["spec_key"] or "未分类"
+        if keys and sk not in keys:
+            continue
+        if platform and r["platform"] != platform:
+            continue
+        if only_ok and (r["price_level"] or "ok") != "ok":
+            continue
+        if condition and (r["condition"] or "new") != condition:
+            continue
+        if cutoff is not None and r["ts"] < cutoff:
+            continue
+        per_spec.setdefault(sk, []).append((float(r["ts"]), float(r["price"])))
+        meta.setdefault(sk, {"platforms": set()})
+        meta[sk]["platforms"].add(r["platform"])
+
+    if not per_spec:
+        return {"bucket": 0, "unit": "", "points": [], "series": []}
+
+    all_ts = [ts for pts in per_spec.values() for ts, _ in pts]
+    span = max(all_ts) - min(all_ts)
+    size, unit = _pick_bucket(span)
+    t0 = min(all_ts)
+
+    def bucket_of(ts):
+        return int((ts - t0) // size)
+
+    # 横轴：从起点到当前，按桶铺满（空桶留空，图上就是断点）
+    last_bucket = bucket_of(max(all_ts))
+    axis = []
+    for b in range(last_bucket + 1):
+        ts = t0 + b * size
+        axis.append({"t": round(ts, 2), "bucket": b,
+                     "label": time.strftime("%m-%d %H:%M", time.localtime(ts))})
+
+    series = []
+    for sk, pts in per_spec.items():
+        buckets = {}
+        for ts, price in pts:
+            b = bucket_of(ts)
+            # 同一个桶里取最低价
+            if b not in buckets or price < buckets[b]:
+                buckets[b] = price
+        vals = [None] * (last_bucket + 1)
+        for b, price in buckets.items():
+            if b < len(vals):
+                vals[b] = round(price, 2)
+        defined = [v for v in vals if v is not None]
+        series.append({
+            "spec_key": sk,
+            "points": vals,
+            "min": round(min(defined), 2),
+            "max": round(max(defined), 2),
+            "last": round(defined[-1], 2),
+            "samples": len(pts),
+            "platforms": sorted(meta[sk]["platforms"]),
+        })
+
+    series.sort(key=lambda s: s["min"])
+    return {"bucket": size, "unit": unit, "points": axis, "series": series}
+
+
+def curve_span():
+    """历史数据的时间跨度与点数，给前端提示"数据够不够画曲线"。"""
+    with transaction() as c:
+        r = c.execute("SELECT COUNT(*) AS n, MIN(ts) AS lo, MAX(ts) AS hi FROM price_history").fetchone()
+    n = int(r["n"] or 0)
+    return {"points": n, "start": r["lo"], "end": r["hi"]}
+
+
 def last_snapshots():
     with transaction() as c:
         rows = c.execute("""
