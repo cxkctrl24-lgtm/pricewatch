@@ -564,6 +564,20 @@ def collect(session, platform, keyword, price_range):
                 pass
             diag = _diagnose(page, platform, keyword)
             log("warn", f"[{name}] 没解析到商品，诊断见 logs/{diag}")
+
+            # 大模型兜底：正则一条都没抽到，反正这一轮本来要失败，
+            # 让本机 Ollama 尽力补抽几条（只在 items==0 时触发，正常采集零开销）。
+            # 注意：这里**不能**替代主提取路径 —— 实测模型抽 40 条要 25 秒还漏 20%。
+            try:
+                from .. import llm_extract
+                items_llm = llm_extract.extract_page_text(page, platform, price_range=(lo, hi))
+                if items_llm:
+                    items_llm = items_llm[: config.MAX_ITEMS_PER_KEYWORD]
+                    log("info", f"[{name}] {keyword} → 模型兜底补抽 {len(items_llm)} 件")
+                    return "ok", f"模型兜底 {len(items_llm)} 件", items_llm
+            except Exception as e:
+                log("warn", f"[{name}] 模型兜底失败(不影响主流程): {str(e)[:80]}")
+
             return "error", "解析不到商品（页面改版或被风控）", []
 
         items = items[: config.MAX_ITEMS_PER_KEYWORD]

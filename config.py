@@ -175,6 +175,16 @@ SKU_DETAIL_TIMEOUT_MS = 15000
 # 详情页之间的间隔（秒）
 SKU_REPRICE_GAP = (2.0, 3.5)
 
+# ---------- 大模型解析兜底 ----------
+# 仅在**正则一条都没抽到**时才调用本机 Ollama，让模型尽力补抽。
+# 实测结论（analysis/llm_page_analysis.md）：本地小模型不能当主力 ——
+# qwen3.5:9b 抽 40 条要 25 秒还漏 20%，而正则 0.1 秒抽 75 条全对。
+# 所以只在"那一轮本来就要失败"时用它，正常采集零开销。
+LLM_FALLBACK = True
+LLM_OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+# 用 9b 不用 2b：实测 2b 在 40 条时崩溃且价格全填 0
+LLM_MODEL = "qwen3.5:9b"
+
 
 # 节奏自适应：被限流过就自动放慢，采顺了再逐步恢复。
 # hits 来自 cooldown.json 的连续限流次数（1 次 → ×1.5，2 次 → ×2.5，3 次 → ×4）。
