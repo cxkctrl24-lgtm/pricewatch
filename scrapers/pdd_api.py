@@ -158,10 +158,19 @@ def _capture_request(page, keyword, timeout_s=MAX_WAIT):
 
 FETCH_JS = r"""
 async (p) => {
+  // 拼多多列表页/搜索页现在要求请求头带 AccessToken（值就是 PDDAccessToken
+  // 这枚 cookie），否则返回空结果。页面上下文的 fetch 会自动带 cookie，
+  // 但**不会**自动把 cookie 提到请求头，所以这里手动补一个。
+  // 见 analysis/github_survey.md 里 onetwo1/pinduoduo 的说明。
+  const headers = {
+    'Content-Type': 'application/json;charset=UTF-8',
+    'Accept': 'application/json',
+  };
+  if (p.accessToken) headers['AccessToken'] = p.accessToken;
   const r = await fetch(p.url, {
     method: 'POST',
     credentials: 'include',
-    headers: {'Content-Type': 'application/json;charset=UTF-8', 'Accept': 'application/json'},
+    headers,
     body: p.body,
   });
   const t = await r.text();
@@ -169,6 +178,21 @@ async (p) => {
   catch (e) { return {status: r.status, raw: t.slice(0, 160)}; }
 }
 """
+
+
+def _access_token(session):
+    """从 PDD 登录态里取 AccessToken。
+
+    实测 cookie 里是 PDDAccessToken；有的环境也可能直接叫 AccessToken。
+    取不到就返回空串，由调用方按「不带这个头」继续跑（至少不会更差）。
+    """
+    try:
+        for c in session.ctx.cookies():
+            if c.get("name") in ("PDDAccessToken", "AccessToken", "pdd_access_token"):
+                return c.get("value") or ""
+    except Exception:
+        pass
+    return ""
 
 
 def fetch(session, keyword, price_range, max_pages=3):
@@ -204,6 +228,11 @@ def fetch(session, keyword, price_range, max_pages=3):
     log("info", f"[拼多多] 已捕获接口模板（anti_content {len(tpl['anti_content'])} 字符）")
 
     items, seen_keys = [], set()
+    access_token = _access_token(session)
+    if access_token:
+        log("info", f"[拼多多] 已带 AccessToken（{len(access_token)} 字符）")
+    else:
+        log("warn", "[拼多多] 登录态里没找到 PDDAccessToken，裸请求很可能被拒")
     flip = tpl.get("flip") or ""
     for page_no in range(1, max_pages + 1):
         body = dict(tpl)
@@ -212,7 +241,11 @@ def fetch(session, keyword, price_range, max_pages=3):
         if flip:
             body["flip"] = flip
         try:
-            res = page.evaluate(FETCH_JS, {"url": base_url, "body": json.dumps(body, ensure_ascii=False)})
+            res = page.evaluate(FETCH_JS, {
+                "url": base_url,
+                "body": json.dumps(body, ensure_ascii=False),
+                "accessToken": access_token,
+            })
         except Exception as e:
             log("warn", f"[拼多多] 第 {page_no} 页请求异常: {str(e)[:100]}")
             break

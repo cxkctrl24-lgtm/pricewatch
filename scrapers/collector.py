@@ -175,20 +175,113 @@ EXTRACT_JS = r"""
 """
 
 
+PDD_EXTRACT_JS = r"""
+(cfg) => {
+  const out = [];
+  const seen = new Set();
+  const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+  const lo = cfg.lo, hi = cfg.hi;
+  const MAXLEN = 260;   // 卡片文本上限，放宽一点（含促销词）
+
+  // PDD 新版卡片：没有 <a>，用 div + 每次发版就变的 hash class。
+  // 判据：这个元素里恰好一个 ¥ 价格 + 有图 + 文本像商品标题。
+  const divs = Array.from(document.querySelectorAll('div'));
+  const cands = [];
+  for (const d of divs) {
+    const t = (d.innerText || '');
+    if (t.length < 12 || t.length > MAXLEN) continue;
+    const yen = (t.match(/[¥￥]/g) || []).length;
+    if (yen !== 1) continue;
+    if (!d.querySelector('img')) continue;
+    cands.push({ el: d, text: clean(t), len: t.length });
+  }
+
+  // 去重：父子元素常常同时入选（同一张卡片被包了多层）。
+  // 不再用"有内层就跳过"（那会只剩 1 条），改为：
+  // 按文本去重，同一个文本只保留**最短**的那个容器（最贴近卡片本身）。
+  const byText = new Map();
+  for (const c of cands) {
+    const prev = byText.get(c.text);
+    if (!prev || c.len < prev.len) byText.set(c.text, c);
+  }
+
+  for (const c of byText.values()) {
+    const text = c.text;
+
+    const pm = text.match(/[¥￥]\s*(\d+(?:\.\d+)?)/);
+    if (!pm) continue;
+    const price = parseFloat(pm[1]);
+    if (!(price >= lo && price <= hi)) continue;
+
+    // 标题清洗：按噪声词表逐段剔除。PDD 卡片文本顺序通常是
+    //   标题 + [促销/保障词] + ¥价格 + [销量/库存]
+    // 所以先切掉价格及其之后的部分（那之后基本是销量/库存），
+    // 再把上半段里的促销词抹掉。
+    let head = text.split(/[¥￥]/)[0];                 // 价格之前的部分
+    head = head
+      .replace(/券后|已拼[^ ]*|本店[^ ]*|已抢[^ ]*|已售[^ ]*|月销[^ ]*|销量[^ ]*|好评[^ ]*|回头客[^ ]*|正品险|限[0-9]*件|仅剩[^ ]*|剩[^ ]*件|退货包运费|正品发票|只换不修|即将售罄|品牌热销[^ ]*|立减[^ ]*|满减[^ ]*|百亿补贴|品牌补贴|官方立减|限时[^ ]*|秒杀|新客[^ ]*|多件优惠|包邮|顺丰包邮|24小时内发货|小时发货|发货|通用[^ ]*|亲民|惠民|热销[^ ]*|[0-9]+万\\+?件/g, ' ')
+      .replace(/\\s+/g, ' ').trim();
+
+    // 标题里只剩这些泛词、没有实际型号信息 → 不是商品卡，丢掉
+    if (head.length < 5) continue;
+    // 必须提到内存/显卡相关词，避免把"推荐位/广告位"混进来
+    if (!/ddr|内存|显卡|rtx|gddr/i.test(head)) continue;
+    let title = head.slice(0, 180);
+
+    // 链接：没 <a> 就用标题合成稳定占位（item_key 走标题 hash）
+    let url = null;
+    const a = c.el.querySelector('a[href]');
+    if (a && a.href) url = a.href;
+    if (!url) {
+      const m = text.match(/(\\d{6,})/);
+      url = m ? ('https://mobile.yangkeduo.com/goods.html?goods_id=' + m[1])
+              : ('https://mobile.yangkeduo.com/goods.html#t=' + encodeURIComponent(title.slice(0, 40)));
+    }
+
+    const k = title.slice(0, 60);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ url, title, price: String(price), shop: '', cardText: text });
+    if (out.length >= (cfg.maxItems || 400)) break;
+  }
+  return out;
+}
+"""
+
+
+def _extract_pdd(page, lo, hi):
+    """拼多多专用提取：按价格卡片找，不依赖商品链接。"""
+    try:
+        return page.evaluate(PDD_EXTRACT_JS, {
+            "lo": lo, "hi": hi,
+            "maxItems": config.MAX_ITEMS_PER_KEYWORD * 2,
+        }) or []
+    except Exception as e:
+        log("warn", f"拼多多提取脚本异常: {str(e)[:120]}")
+        return []
+
+
 def _extract_items(page, platform, price_range):
     cfg = config.PLATFORMS[platform]
     lo, hi = price_range
-    try:
-        raw = page.evaluate(EXTRACT_JS, {
-            "price": cfg["selectors"]["price"],
-            "title": cfg["selectors"]["title"],
-            "shop": cfg["selectors"]["shop"],
-            "urlMatch": list(cfg["item_url_match"]),
-            "maxItems": config.MAX_ITEMS_PER_KEYWORD * 2,
-        })
-    except Exception as e:
-        log("warn", f"页面提取脚本异常: {str(e)[:120]}")
-        return []
+
+    # 拼多多改版后**页面上一个 <a> 都没有**（实测 anchors=0），商品卡片
+    # 用 div + 每次发版就变的 hash class 渲染。原来"先找商品域名链接、
+    # 再回溯卡片"的通用逻辑在 PDD 上必然拿到 0 条。这里走专用提取。
+    if platform == "pdd":
+        raw = _extract_pdd(page, lo, hi)
+    else:
+        try:
+            raw = page.evaluate(EXTRACT_JS, {
+                "price": cfg["selectors"]["price"],
+                "title": cfg["selectors"]["title"],
+                "shop": cfg["selectors"]["shop"],
+                "urlMatch": list(cfg["item_url_match"]),
+                "maxItems": config.MAX_ITEMS_PER_KEYWORD * 2,
+            })
+        except Exception as e:
+            log("warn", f"页面提取脚本异常: {str(e)[:120]}")
+            return []
 
     results = []
     seen = set()
@@ -198,6 +291,7 @@ def _extract_items(page, platform, price_range):
         price = parse_price(info.get("price"))
         if not url or price is None:
             continue
+        # PDD 的卡片没有真实链接（合成 URL 也带 goods 段，同样通过）
         if not any(m in url for m in cfg["item_url_match"]):
             continue
         if not (lo <= price <= hi):

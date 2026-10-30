@@ -35,7 +35,10 @@ LOGIN_COOKIES = {
     # 只认登录后才会下发的身份 cookie；cookie2 / _l_g_ 访客也有，绝不能算
     "taobao": ["unb", "tracknick"],
     "jd": ["pt_key", "thor", "pt_pin"],
-    "pdd": ["PASS_ID", "pdd_user_id"],
+    # 拼多多：实测登录态里没有 PASS_ID，真正的凭据是 PDDAccessToken
+    # （见 analysis/github_survey.md：PDD 列表页/搜索页要求请求头带
+    #   AccessToken，值就是这枚 cookie）。PASS_ID 仍保留以兼容旧登录态。
+    "pdd": ["PDDAccessToken", "PASS_ID", "pdd_user_id"],
 }
 
 LAUNCH_ARGS = [
