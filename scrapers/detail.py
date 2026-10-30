@@ -205,13 +205,20 @@ def parse_pdd(html):
 PARSERS = {"taobao": parse_taobao, "jd": parse_jd, "pdd": parse_pdd}
 
 
-def fetch_sku_prices(session, platform, url):
-    """打开详情页并解析内嵌 SKU JSON。返回 (status, message, payload)。"""
+def fetch_sku_prices(session, platform, url, timeout_ms=None):
+    """打开详情页并解析内嵌 SKU JSON。返回 (status, message, payload)。
+
+    timeout_ms 传 None 时用 config.NAV_TIMEOUT_MS。批量补读详情页时
+    会传更短的值（config.SKU_DETAIL_TIMEOUT_MS）—— 详情页读不到就算了，
+    不该为了一件商品把整轮采集拖住。
+    """
     page = session.page()
+    to = int(timeout_ms or config.NAV_TIMEOUT_MS)
     log("info", f"[{platform}] 解析详情页规格: {url[:80]}")
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=45000)
-        page.wait_for_timeout(2000)
+        page.goto(url, wait_until="domcontentloaded", timeout=to)
+        # 等待固定量，不再用 2 秒硬等：按超时预算比例给，最少留 0.8 秒
+        page.wait_for_timeout(min(2000, max(800, to // 5)))
         html = page.content()
     except Exception as e:
         log("warn", f"[{platform}] 详情页打开失败: {str(e)[:120]}")

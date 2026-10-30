@@ -172,11 +172,16 @@ def _reprice_multi_spec(session, platform, items, group, task):
         return -score          # 负数用于升序排序 = 分数高的排前面
 
     candidates.sort(key=_suspicion)
-    limit = int(getattr(config, "SKU_REPRICE_MAX_PER_KEYWORD", 12))
+    limit = int(getattr(config, "SKU_REPRICE_MAX_PER_KEYWORD", 8))
     # 只保留真正可疑的（score>0），别为了"校正"去跑一堆本来就对价的商品
     candidates = [c for c in candidates if _suspicion(c) < 0][:limit]
 
+    budget = float(getattr(config, "SKU_REPRICE_BUDGET", 90))
+    detail_timeout = int(getattr(config, "SKU_DETAIL_TIMEOUT_MS", 15000))
+    started = time.time()
+
     fixed = 0
+    tried = 0
     from .scrapers import detail as detail_mod
     for it in candidates:
         # 用户点了取消就立刻收手 —— 详情页一轮要跑几十秒，
@@ -184,11 +189,18 @@ def _reprice_multi_spec(session, platform, items, group, task):
         if _is_cancelled(task):
             log("info", "[SKU校正] 收到取消，停止补读详情页")
             break
+        # 总时间预算：详情页可能被风控卡到超时，不能让一件商品
+        # 把整轮采集拖住。超预算就直接收手，用列表价。
+        if time.time() - started > budget:
+            log("info", f"[SKU校正] 已用满 {int(budget)} 秒预算，剩下的下一轮再校正")
+            break
         url = it.get("url") or ""
         if not url:
             continue
+        tried += 1
         try:
-            _st, _msg, payload = detail_mod.fetch_sku_prices(session, platform, url)
+            _st, _msg, payload = detail_mod.fetch_sku_prices(
+                session, platform, url, timeout_ms=detail_timeout)
         except Exception as e:
             log("warn", f"[SKU校正] 详情页读取失败，保留列表价: {str(e)[:90]}")
             continue
@@ -234,8 +246,10 @@ def _reprice_multi_spec(session, platform, items, group, task):
             log("info", "[SKU校正] 收到取消，停止补读详情页")
             break
 
-    if fixed and task is not None:
-        _msg(task, "info", f"[SKU校正] 本轮修正 {fixed} 件多规格商品的价格档位")
+    if tried and task is not None:
+        _msg(task, "info",
+             f"[SKU校正] 本轮试读 {tried} 件详情页，修正 {fixed} 件价格档位"
+             f"（用时 {int(time.time() - started)} 秒）")
     return fixed
 
 
