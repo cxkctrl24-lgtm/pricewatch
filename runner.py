@@ -54,11 +54,43 @@ def current_task():
 
 
 def cancel():
+    """取消当前任务。
+
+    只改标志位是不够的 —— 采集线程可能正卡在详情页抓取（单条 1~5 秒）
+    或 sleep 间隔里，标志位要等到下一次检查才生效，用户会觉得「取消没反应」。
+    这里把标志位设成 cancelled，并且让所有等待点都用 _sleep_unless_cancelled()
+    轮询，几百毫秒内就能响应。
+    """
     with _state_lock:
         t = get_task()
         if t and t["status"] == "running":
             t["status"] = "cancelled"
     return True
+
+
+def _is_cancelled(task=None):
+    """当前任务是否已被取消。task 传 None 时取当前任务。"""
+    t = task if task is not None else get_task()
+    try:
+        return bool(t) and t.get("status") == "cancelled"
+    except Exception:
+        return False
+
+
+def _sleep_unless_cancelled(seconds, task=None, step=0.25):
+    """可被取消打断的 sleep。
+
+    把一整段 sleep 切成 step 小片，每片检查一次取消标志。
+    返回 True 表示「中途被取消，调用方应立刻收手」。
+    """
+    remaining = float(seconds or 0)
+    while remaining > 0:
+        if _is_cancelled(task):
+            return True
+        chunk = min(step, remaining)
+        time.sleep(chunk)
+        remaining -= chunk
+    return _is_cancelled(task)
 
 
 def _set_login_needed(task, platform):
@@ -147,6 +179,11 @@ def _reprice_multi_spec(session, platform, items, group, task):
     fixed = 0
     from .scrapers import detail as detail_mod
     for it in candidates:
+        # 用户点了取消就立刻收手 —— 详情页一轮要跑几十秒，
+        # 不检查的话「取消」看起来要等一整轮才生效。
+        if _is_cancelled(task):
+            log("info", "[SKU校正] 收到取消，停止补读详情页")
+            break
         url = it.get("url") or ""
         if not url:
             continue
@@ -192,7 +229,10 @@ def _reprice_multi_spec(session, platform, items, group, task):
         fixed += 1
         log("info", f"[SKU校正] {it.get('title', '')[:26]}… "
                     f"¥{old_price:.0f} → ¥{new_price:.0f}（{key}）")
-        time.sleep(random.uniform(*getattr(config, "SKU_REPRICE_GAP", (3.0, 6.0))))
+        if _sleep_unless_cancelled(
+                random.uniform(*getattr(config, "SKU_REPRICE_GAP", (3.0, 6.0))), task):
+            log("info", "[SKU校正] 收到取消，停止补读详情页")
+            break
 
     if fixed and task is not None:
         _msg(task, "info", f"[SKU校正] 本轮修正 {fixed} 件多规格商品的价格档位")
@@ -396,7 +436,11 @@ def _run(task, platforms, group_ids, force_relogin):
                     db.record_snapshot(task["id"], platform, kw, "error", message, 0)
                     _msg(task, "error", f"{name} · {kw}: {message}")
                 task["progress"]["done"] += 1
-                time.sleep(random.uniform(*config.pacing(platform)["kw_gap"]))
+                # 可被取消打断的间隔等待
+                if _sleep_unless_cancelled(
+                        random.uniform(*config.pacing(platform)["kw_gap"]), task):
+                    _msg(task, "info", "收到取消，停止当前任务")
+                    break
 
         bm.set_active(platform, None)
         try:
@@ -417,7 +461,8 @@ def _run(task, platforms, group_ids, force_relogin):
             else:
                 rest = random.uniform(*config.GENTLE_PLATFORM_GAP)
                 _msg(task, "info", f"歇 {rest:.0f} 秒再切下一个平台（温和模式）")
-            time.sleep(rest)
+            if _sleep_unless_cancelled(rest, task):
+                _msg(task, "info", "收到取消，不再切换下一个平台")
 
     with _state_lock:
         if task["status"] == "running":
@@ -431,19 +476,20 @@ def _run(task, platforms, group_ids, force_relogin):
 
 
 def resume_after_login(platform, group_ids=None, platforms=None):
-    """登录完成后继续采集。若已有任务在跑，排队等它结束再启动。"""
-    plats = platforms or [platform]
+    """已停用：登录成功后不再自动开始采集。
 
-    def _wait_then_run():
-        for _ in range(240):  # 最多等 20 分钟
-            cur = current_task()
-            if not (cur and cur["status"] == "running"):
-                break
-            time.sleep(5)
-        run_collect(platforms=plats, group_ids=group_ids, source="resume", force_relogin=True)
+    早期行为是「扫码登录成功 → 立刻排队起一轮采集」。这带来三个问题：
+      1. 新采集 Session 会抢同一个 profile 的 Chromium 单实例锁，
+         把用户刚打开的登录窗口顶掉（"顶掉了登录页面"）；
+      2. 用户只是想登录，并没有要求采集；
+      3. 采集一起，取消按钮还要等这一整轮跑完才生效。
 
-    threading.Thread(target=_wait_then_run, daemon=True).start()
-    return True
+    现在保留这个函数只为兼容旧调用点：它什么都不做，直接返回 False。
+    要采集请由用户在界面点「开始采集」。
+    """
+    db.log("info", f"{config.PLATFORMS.get(platform, {}).get('name', platform)} "
+                   f"登录完成；不会自动开始采集，请手动点「开始采集」")
+    return False
 
 
 # ---------------- 每日定时 ----------------

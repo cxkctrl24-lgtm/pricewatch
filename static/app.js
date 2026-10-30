@@ -122,14 +122,38 @@ async function startCollect() {
   pollState();
 }
 $("#startBtn").addEventListener("click", startCollect);
-$("#cancelBtn").addEventListener("click", async () => { await api("/api/cancel", { method: "POST" }); pollState(); });
-
-/* ---------- 登录 ---------- */
-async function doLogin(pid) {
-  const groups = $$("#groupChips input:checked").map(i => i.value);
+/* 取消要给出即时反馈：后端是协作式取消，采集线程可能正卡在详情页抓取里，
+   最长几百毫秒才真正停下。期间按钮变成「正在取消…」并禁用，用户就不会
+   以为点了没反应而反复点。 */
+$("#cancelBtn").addEventListener("click", async (ev) => {
+  const btn = ev.currentTarget;
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "正在取消…";
   $("#miniLog").insertAdjacentHTML("afterbegin",
-    `<div class="l-warn">正在打开 ${PLAT_NAME[pid] || pid} 登录窗口，请在弹出的浏览器里扫码登录…</div>`);
-  await api("/api/login", { method: "POST", body: JSON.stringify({ platform: pid, groups }) });
+    `<div class="l-warn">已发出取消请求，正在停止当前任务…</div>`);
+  try {
+    await api("/api/cancel", { method: "POST" });
+  } catch (e) {}
+  // 轮询直到状态真的不再是 running（最多等 3 秒）
+  for (let i = 0; i < 12; i++) {
+    await new Promise(r => setTimeout(r, 250));
+    await pollState();
+    const t = state.task;
+    if (!t || t.status !== "running") break;
+  }
+  btn.textContent = old;
+  pollState();
+});
+
+/* ---------- 登录 ----------
+   登录就是登录：不自动开始采集。
+   早期版本把当前勾选的品类一起传给后端，登录成功就自动起一轮采集 ——
+   那会新开一个浏览器抢同一个 profile 的锁，把正在扫码的登录窗口顶掉。 */
+async function doLogin(pid) {
+  $("#miniLog").insertAdjacentHTML("afterbegin",
+    `<div class="l-warn">正在打开 ${PLAT_NAME[pid] || pid} 登录窗口，请在弹出的浏览器里扫码登录…（登录完不会自动采集）</div>`);
+  await api("/api/login", { method: "POST", body: JSON.stringify({ platform: pid }) });
   pollState();
   startLoginPoll(pid);
 }

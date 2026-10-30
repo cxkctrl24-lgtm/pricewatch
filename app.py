@@ -86,18 +86,22 @@ def api_login():
     platform = data.get("platform")
     if platform not in PLATFORMS:
         return jsonify({"ok": False, "message": "未知平台"})
-    groups = data.get("groups") or []
 
     def _open():
         name = PLATFORMS[platform]["name"]
         db.log("info", f"正在打开 {name} 登录窗口…")
-        ok = login_flow(
-            platform,
-            timeout_s=600,
-            interval_s=3.0,
-            on_success=lambda: runner.resume_after_login(platform, group_ids=groups),
-        )
-        db.log("info", f"{name} 登录{'成功，已保存登录态' if ok else '未成功'}")
+        # 登录成功后**只保存登录态，不自动开采集**。
+        # 早期版本这里挂了 on_success=resume_after_login：
+        #   · 刚打开登录页就立刻起采集，新 Session 会抢同一个 profile 的单实例锁，
+        #     把用户正在扫码的登录窗口顶掉（"顶掉了登录页面"）；
+        #   · 用户根本没有要采集，却被自动拉起一轮全量采集。
+        # 现在登录就是登录，采不采由用户在界面上点「开始采集」决定。
+        ok = login_flow(platform, timeout_s=600, interval_s=3.0)
+        if ok:
+            bm.login_flags[platform] = True
+            db.log("info", f"{name} 登录成功，登录态已保存。要采集请点「开始采集」")
+        else:
+            db.log("info", f"{name} 登录未成功")
 
     threading.Thread(target=_open, daemon=True).start()
     return jsonify({"ok": True, "message": "正在打开登录窗口，请稍等几秒"})
@@ -107,15 +111,13 @@ def api_login():
 def api_check_login():
     data = request.get_json(silent=True) or {}
     platform = data.get("platform")
-    groups = data.get("groups") or []
     if platform not in PLATFORMS:
         return jsonify({"ok": False, "message": "未知平台"})
 
     def _check():
         ok = bm.is_logged_in(platform, refresh=True, probe=True)
         db.log("info", f"{PLATFORMS[platform]['name']} {'已登录' if ok else '还没登录'}")
-        if ok:
-            runner.resume_after_login(platform, group_ids=groups)
+        # 只更新登录态，不触发采集（同上）
 
     threading.Thread(target=_check, daemon=True).start()
     return jsonify({"ok": True, "message": "正在检测登录态"})
