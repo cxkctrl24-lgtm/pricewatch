@@ -156,21 +156,17 @@ def _fetch_detail_with_deadline(session, platform, url, timeout_ms, platform_nam
             if tmp_profile:
                 s2 = Session(platform, headless=True, profile_dir=tmp_profile).__enter__()
                 # 关键：临时 profile 是全新的，**没有登录 cookie**。
-                # 淘宝/京东详情页要登录才能看完整 SKU，所以把主 profile 的
-                # cookie 复制过来（只复制 cookie，不共享目录 —— 共享目录会抢锁）。
-                try:
-                    for c in session.ctx.cookies():
-                        try:
-                            s2.ctx.add_cookies([{
-                                "name": c.get("name"),
-                                "value": c.get("value"),
-                                "domain": c.get("domain"),
-                                "path": c.get("path") or "/",
-                            }])
-                        except Exception:
-                            continue
-                except Exception as e:
-                    db.log("warn", f"[SKU校正] 复制登录 cookie 失败: {str(e)[:80]}")
+                # 淘宝/京东详情页要登录才能看完整 SKU。
+                # 但**不能在子线程里读主 session 的 cookie** —— Playwright 对象
+                # 绑定创建它的线程，跨线程访问会报
+                # "Cannot switch to a different thread"（实测踩到，
+                #  直接后果是每件详情页都拿不到登录态、SKU 全是空的）。
+                # 所以 cookie 由调用方在主线程预先取好，通过 box 传进来。
+                for c in (box.get("cookies") or []):
+                    try:
+                        s2.ctx.add_cookies([c])
+                    except Exception:
+                        continue
             else:
                 s2 = Session(platform, headless=True).__enter__()
             _st, _msg, payload = detail_mod.fetch_sku_prices(
@@ -184,6 +180,17 @@ def _fetch_detail_with_deadline(session, platform, url, timeout_ms, platform_nam
                     s2.close()
             except Exception:
                 pass
+
+    # 在主线程里先把 cookie 取好（跨线程访问 Playwright 对象会直接报错）
+    try:
+        box["cookies"] = [
+            {"name": c.get("name"), "value": c.get("value"),
+             "domain": c.get("domain"), "path": c.get("path") or "/"}
+            for c in session.ctx.cookies()
+        ]
+    except Exception as e:
+        db.log("warn", f"[SKU校正] 主线程取 cookie 失败: {str(e)[:70]}")
+        box["cookies"] = []
 
     th = threading.Thread(target=_worker, daemon=True,
                           name=f"sku-detail-{platform}")

@@ -285,6 +285,8 @@ def _extract_items(page, platform, price_range):
 
     results = []
     seen = set()
+    ad_dropped = 0
+    model_calls = 0
     for info in raw or []:
         url = info.get("url") or ""
         title = _clean_title(info.get("title"))
@@ -305,6 +307,23 @@ def _extract_items(page, platform, price_range):
         card_text = info.get("cardText") or ""
         if card_text.count("¥") + card_text.count("￥") > 4:
             continue
+
+        # 商品卡 vs 广告位/推荐位判别。
+        # 规则层 0 秒判完绝大部分；只有规则拿不准的才问模型（实测约 6%）。
+        # 每页模型调用有上限，避免某页全是边界情况时被拖慢。
+        if getattr(config, "CARD_CLASSIFY", True):
+            from .. import card_classify
+            probe = card_text or title
+            if model_calls < int(getattr(config, "CARD_CLASSIFY_MAX_CALLS", 12)):
+                ok_card, _src = card_classify.is_goods_card(probe)
+                if _src == "model":
+                    model_calls += 1
+            else:
+                ok_card, _src = card_classify.is_goods_card(probe, use_model=False)
+            if not ok_card:
+                ad_dropped += 1
+                continue
+
         key = _item_key(url, title)
         if key in seen:
             continue
@@ -316,6 +335,8 @@ def _extract_items(page, platform, price_range):
             "shop": _clean_title(info.get("shop"))[:60],
             "url": url,
         })
+    if ad_dropped:
+        log("info", f"  丢弃非商品卡片 {ad_dropped} 张（广告位/推荐位/导航）")
     return results
 
 

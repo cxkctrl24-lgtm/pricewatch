@@ -206,9 +206,29 @@ def classify(title, group_id=None):
         out["gen"] = "DDR3"
     elif re.search(r"DDR2|ddr2|DDR 2", title):
         out["gen"] = "DDR2"
-    elif group_id == "ddr5":
+
+    # ---- 口语代号：真实 SKU 名里大量存在，正则会漏 ----
+    # 实测（tmp/sku_norm_probe.py）：15 条真实规格名里有 5 条解析失败，
+    # **全部**都是因为写了代号而不是 DDRx ——
+    #   「四代 8G 2666 台机」   四代 = DDR4
+    #   「D5 16G*2 6000」      D5  = DDR5
+    #   「16G(8G*2) D4 3200」  D4  = DDR4
+    #   「二代 4G 1333」        二代 = DDR2
+    #   「D3 8G 1600」         D3  = DDR3
+    # 这些都是纯规则能解决的，不必劳烦模型（模型 0.8s/条，这里 0 开销）。
+    if not out["gen"]:
+        if re.search(r"五代|5代|D5\b|\bDDR5?", title):
+            out["gen"] = "DDR5"
+        elif re.search(r"四代|4代|D4\b|\bDDR4?", title):
+            out["gen"] = "DDR4"
+        elif re.search(r"三代|3代|D3\b|\bDDR3?", title):
+            out["gen"] = "DDR3"
+        elif re.search(r"二代|2代|D2\b|\bDDR2?", title):
+            out["gen"] = "DDR2"
+
+    if not out["gen"] and group_id == "ddr5":
         out["gen"] = "DDR5"
-    elif group_id == "ddr4":
+    elif not out["gen"] and group_id == "ddr4":
         out["gen"] = "DDR4"
 
     # 标题里同时出现两代（"DDR4 兼容 DDR3"、多规格挂一起）→ 记下来，
