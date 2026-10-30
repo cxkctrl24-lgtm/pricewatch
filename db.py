@@ -375,43 +375,59 @@ def _pick_bucket(span_sec):
     return CURVE_BUCKETS[-1]
 
 
-def curve_series(spec_keys=None, platform=None, group=None,
-                 condition=None, only_ok=True, days=None):
-    """按「规格分类」聚合历史价格曲线。
+def curve_series(product_ids=None, platform=None, group=None,
+                 condition=None, only_ok=True, days=None, limit=40):
+    """**按单个商品**输出历史价格曲线 —— 每个商品一条独立曲线。
 
-    每个点是一次采集时间桶内该分类的**最低价**（比价看的就是最低成交价），
-    另外附带该桶内的样本数，点太稀疏时方便判断可信度。
+    一个商品一条线，看的是这件货自己贵过几次、便宜过几次；
+    不是把同类商品的最低/最高糊成一条（那样只能看大盘，看不到单品走势）。
+
+    参数 product_ids 指定要画哪几件（详情弹层用）；
+    不指定时按最近价格从低到高挑前 limit 件（概览用）。
 
     返回 {
-      bucket: 桶秒数, unit: 桶单位, points: [{t, label}] 横轴,
-      series: [{spec_key, points: [v1, v2, ...], min, max, last, n}]
+      bucket: 桶秒数, unit: 桶单位, points: [{t, label, bucket}] 横轴,
+      series: [{
+         id, title, platform, shop, url, spec_key, condition,
+         points: [v0, v1, ...]（与 points 同长，无数据处为 null）,
+         min, max, last, first, delta_pct, samples
+      }]
     }
-    横轴是全局统一的，各分类共享同一根时间轴，才能横向对比。
+    所有商品共享同一根时间轴，纵向一列就是同一次采集的价格。
     """
     with transaction() as c:
         rows = c.execute("""
-            SELECT p.id, p.spec_key, p.platform, p.condition, p.price_level,
-                   h.price, h.ts
+            SELECT p.id, p.title, p.platform, p.shop, p.url, p.spec_key, p.condition,
+                   p.price_level, h.price, h.ts
             FROM price_history h
             JOIN products p ON p.id = h.product_id
             ORDER BY h.ts ASC
         """).fetchall()
+        # 没有历史点的商品也要能在列表里看到（只是曲线短）
+        if not rows:
+            return {"bucket": 0, "unit": "", "points": [], "series": []}
 
-    if not rows:
-        return {"bucket": 0, "unit": "", "points": [], "series": []}
+    # group 过滤：products 没有 group_id 列，用规格前缀 → 分组名映射
+    group_prefix = None
+    if group:
+        for g in config.KEYWORD_GROUPS:
+            if g["id"] == group:
+                group_prefix = g["name"].split()[0]      # "DDR5 内存" → "DDR5"
+                break
 
-    keys = set(spec_keys) if spec_keys else None
+    wanted = set(product_ids) if product_ids else None
     now = time.time()
     cutoff = now - days * 86400 if days else None
 
-    # 先按分类归集 (ts, price)，顺手统计该分类的组信息
-    per_spec = {}
+    per_product = {}
     meta = {}
     for r in rows:
-        sk = r["spec_key"] or "未分类"
-        if keys and sk not in keys:
+        pid = r["id"]
+        if wanted and pid not in wanted:
             continue
         if platform and r["platform"] != platform:
+            continue
+        if group_prefix and not (r["spec_key"] or "").startswith(group_prefix):
             continue
         if only_ok and (r["price_level"] or "ok") != "ok":
             continue
@@ -419,14 +435,29 @@ def curve_series(spec_keys=None, platform=None, group=None,
             continue
         if cutoff is not None and r["ts"] < cutoff:
             continue
-        per_spec.setdefault(sk, []).append((float(r["ts"]), float(r["price"])))
-        meta.setdefault(sk, {"platforms": set()})
-        meta[sk]["platforms"].add(r["platform"])
+        per_product.setdefault(pid, []).append((float(r["ts"]), float(r["price"])))
+        meta[pid] = {
+            "id": pid,
+            "title": r["title"],
+            "platform": r["platform"],
+            "shop": r["shop"] or "",
+            "url": r["url"],
+            "spec_key": r["spec_key"] or "",
+            "condition": r["condition"] or "new",
+        }
 
-    if not per_spec:
+    if not per_product:
         return {"bucket": 0, "unit": "", "points": [], "series": []}
 
-    all_ts = [ts for pts in per_spec.values() for ts, _ in pts]
+    # 概览模式：取最近价格最低的 limit 件
+    if not wanted:
+        def last_price(pid):
+            pts = per_product.get(pid)
+            return pts[-1][1] if pts else float("inf")
+        keep = sorted(per_product.keys(), key=last_price)[:limit]
+        per_product = {k: per_product[k] for k in keep}
+
+    all_ts = [ts for pts in per_product.values() for ts, _ in pts]
     span = max(all_ts) - min(all_ts)
     size, unit = _pick_bucket(span)
     t0 = min(all_ts)
@@ -434,7 +465,6 @@ def curve_series(spec_keys=None, platform=None, group=None,
     def bucket_of(ts):
         return int((ts - t0) // size)
 
-    # 横轴：从起点到当前，按桶铺满（空桶留空，图上就是断点）
     last_bucket = bucket_of(max(all_ts))
     axis = []
     for b in range(last_bucket + 1):
@@ -443,11 +473,11 @@ def curve_series(spec_keys=None, platform=None, group=None,
                      "label": time.strftime("%m-%d %H:%M", time.localtime(ts))})
 
     series = []
-    for sk, pts in per_spec.items():
+    for pid, pts in per_product.items():
         buckets = {}
         for ts, price in pts:
             b = bucket_of(ts)
-            # 同一个桶里取最低价
+            # 同一件商品在同一个桶里取最低价（一次采集里它就是这个价）
             if b not in buckets or price < buckets[b]:
                 buckets[b] = price
         vals = [None] * (last_bucket + 1)
@@ -455,17 +485,23 @@ def curve_series(spec_keys=None, platform=None, group=None,
             if b < len(vals):
                 vals[b] = round(price, 2)
         defined = [v for v in vals if v is not None]
+        if not defined:
+            continue
+        m = meta[pid]
+        first_v, last_v = defined[0], defined[-1]
         series.append({
-            "spec_key": sk,
+            **m,
             "points": vals,
             "min": round(min(defined), 2),
             "max": round(max(defined), 2),
-            "last": round(defined[-1], 2),
+            "first": round(first_v, 2),
+            "last": round(last_v, 2),
+            "delta_pct": round((last_v - first_v) / first_v * 100, 1) if first_v else 0.0,
             "samples": len(pts),
-            "platforms": sorted(meta[sk]["platforms"]),
         })
 
-    series.sort(key=lambda s: s["min"])
+    # 默认按「最近价」升序，跟列表页一致
+    series.sort(key=lambda s: s["last"])
     return {"bucket": size, "unit": unit, "points": axis, "series": series}
 
 

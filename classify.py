@@ -69,8 +69,26 @@ USED_MARKS = (
 NEW_MARKS = ("全新", "新品", "正品全新", "原封", "未拆", "未开封", "盒装全新")
 
 
+def _capacities_all(title):
+    """标题里出现的所有「像内存容量」的数字（去重、升序）。
+
+    只认 4/6/8/12/16/24/32/48/64/96/128 这些常见档位，避开频率、型号数字。
+    """
+    caps = set()
+    for x in CAP_RE.findall(title or ""):
+        v = int(x)
+        if v in (4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128):
+            caps.add(v)
+    return sorted(caps)
+
+
 def _first_capacity(title):
-    """返回 (单条容量, 条数, 总容量)。"""
+    """返回 (单条容量, 条数, 总容量)。
+
+    注意：多容量标题（"8G 16G 32G 全兼容"）没法从标题判断列表价对应哪一档 ——
+    这种条目会被 multi_cap=True 标出来，由采集层去详情页用 SKU 定价，
+    而不是拿列表页最低价硬塞进某一档。
+    """
     m = CAP_SET_RE.search(title)
     if m:
         single = int(m.group(1))
@@ -79,8 +97,7 @@ def _first_capacity(title):
         if count > 1:
             return single, count, single * count
         return single, 1, single
-    caps = [int(x) for x in CAP_RE.findall(title)]
-    caps = [c for c in caps if c in (4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128)]
+    caps = _capacities_all(title)
     if not caps:
         return None, None, None
     # 多容量标题取最小（和列表页展示的低价对应）
@@ -183,10 +200,25 @@ def classify(title, group_id=None):
         out["gen"] = "DDR5"
     elif re.search(r"DDR4|ddr4|DDR 4", title):
         out["gen"] = "DDR4"
+    elif re.search(r"DDR3|ddr3|DDR 3", title):
+        # 老一代内存。原先这里没有分支，DDR3 标题会掉进下面的 group_id 兜底，
+        # 被硬判成 DDR4 —— ¥69 的 4G DDR3 就这样混进了 DDR4 8G 的最低价里。
+        out["gen"] = "DDR3"
+    elif re.search(r"DDR2|ddr2|DDR 2", title):
+        out["gen"] = "DDR2"
     elif group_id == "ddr5":
         out["gen"] = "DDR5"
     elif group_id == "ddr4":
         out["gen"] = "DDR4"
+
+    # 标题里同时出现两代（"DDR4 兼容 DDR3"、多规格挂一起）→ 记下来，
+    # 这种条目不能拿列表页价格去代表任何一代，后面会被判定为不可定价。
+    gens = set()
+    for g, pat in (("DDR5", r"DDR\s*5"), ("DDR4", r"DDR\s*4"),
+                   ("DDR3", r"DDR\s*3"), ("DDR2", r"DDR\s*2")):
+        if re.search(pat, title, re.I):
+            gens.add(g)
+    out["gens_all"] = sorted(gens)
 
     out["brand"] = _brand(title)
 
@@ -207,6 +239,14 @@ def classify(title, group_id=None):
     out["cap"] = cap
     out["count"] = cnt
     out["cap_total"] = total
+    out["caps_all"] = _capacities_all(title)
+
+    # 标题挂着多个容量 → 列表页价格只代表其中最便宜那一档，不能代表整个商品。
+    # 这种条目必须由详情页 SKU 定价（runner 会用它替换列表价）。
+    out["multi_cap"] = len(out["caps_all"]) >= 2
+    # 标题挂多代内存（DDR3/DDR4 一起卖）同理，而且更危险 —— 便宜的是旧代。
+    out["multi_gen"] = len(out.get("gens_all") or []) >= 2
+
     out["freq"] = _first_freq(title)
     out["freq_band"] = _freq_band(out["freq"])
     out["mem_type"] = _mem_type(title)

@@ -169,25 +169,21 @@
         </table>
       </div>
 
-      <!-- 价格曲线：按规格分类画历史最低价走势 -->
+      <!-- 价格曲线：每个商品一条独立曲线 -->
       <div class="curve-wrap" id="curveWrap" hidden>
         <div class="curve-toolbar">
-          <span class="muted">时间粒度</span>
+          <span class="muted">时间范围</span>
           <div class="seg" id="curveRange">
             <button data-days="" class="active">全部</button>
             <button data-days="1">近 1 天</button>
             <button data-days="7">近 7 天</button>
             <button data-days="30">近 30 天</button>
           </div>
+          <span class="muted" id="curvePickInfo"></span>
           <span class="curve-stat" id="curveStat">—</span>
         </div>
-        <div class="curve-chart">
-          <div class="curve-canvas" id="curveCanvas">
-            <div class="curve-empty">正在加载曲线…</div>
-          </div>
-          <div class="curve-legend" id="curveLegend">
-            <h4>选择要画的分类</h4>
-          </div>
+        <div class="curve-grid" id="curveGrid">
+          <div class="curve-empty">正在加载…</div>
         </div>
       </div>
 

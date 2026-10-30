@@ -194,31 +194,38 @@ def api_history(product_id):
 
 @app.route("/api/curve")
 def api_curve():
-    """价格曲线：按规格分类聚合历史最低价。
+    """价格曲线：**每个商品一条独立曲线**。
 
     参数：
-      spec=分类键（可重复 / 逗号分隔），不传就是全部
+      id=商品 id（可重复 / 逗号分隔），指定要看哪几件单品
       platform / group / condition  与列表页同一套筛选
       level=all 时把"异常"条目也算进去（默认 ok）
       days=只看最近 N 天
+      limit=不指定 id 时，按最近低价取前 N 件（默认 40）
     """
-    raw = request.args.getlist("spec")
-    keys = []
+    raw = request.args.getlist("id")
+    ids = []
     for item in raw:
-        keys.extend([x.strip() for x in item.split(",") if x.strip()])
+        ids.extend([x.strip() for x in item.split(",") if x.strip()])
+    ids = [int(x) for x in ids if x.isdigit()]
     level = request.args.get("level") or "ok"
     days = request.args.get("days")
     try:
         days = float(days) if days else None
     except ValueError:
         days = None
+    try:
+        limit = int(request.args.get("limit") or 40)
+    except ValueError:
+        limit = 40
     data = db.curve_series(
-        spec_keys=keys or None,
+        product_ids=ids or None,
         platform=request.args.get("platform") or None,
         group=request.args.get("group") or None,
         condition=request.args.get("condition") or None,
         only_ok=(level == "ok"),
         days=days,
+        limit=max(1, min(limit, 200)),
     )
     data["ok"] = True
     data["span"] = db.curve_span()
