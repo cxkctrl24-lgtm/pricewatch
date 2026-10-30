@@ -23,16 +23,18 @@ import statistics
 # 区间是「一手全新」的常见成交价，二手通常是 40%–60%。
 BASELINE = {
     # DDR5 台式
-    ("DDR5", 8, 1, "台式"): (260, 700),
-    ("DDR5", 16, 1, "台式"): (450, 1500),
-    ("DDR5", 32, 1, "台式"): (900, 3200),
-    ("DDR5", 16, 2, "台式"): (900, 3600),     # 16G×2
-    ("DDR5", 32, 2, "台式"): (1800, 7000),    # 32G×2
+    # 下界按真实在售最低价放低：DDR5 16G×2 已有 ¥439 的正规套装在售，
+    # 原来 ¥900 的下界会把它们直接判成 reject，属于基准定得过高。
+    ("DDR5", 8, 1, "台式"): (200, 700),
+    ("DDR5", 16, 1, "台式"): (350, 1500),
+    ("DDR5", 32, 1, "台式"): (700, 3200),
+    ("DDR5", 16, 2, "台式"): (400, 3600),     # 16G×2
+    ("DDR5", 32, 2, "台式"): (1100, 7000),    # 32G×2
     # DDR5 笔记本
-    ("DDR5", 8, 1, "笔记本"): (200, 650),
-    ("DDR5", 16, 1, "笔记本"): (400, 1400),
-    ("DDR5", 32, 1, "笔记本"): (800, 2800),
-    ("DDR5", 16, 2, "笔记本"): (800, 2800),
+    ("DDR5", 8, 1, "笔记本"): (180, 650),
+    ("DDR5", 16, 1, "笔记本"): (320, 1400),
+    ("DDR5", 32, 1, "笔记本"): (650, 2800),
+    ("DDR5", 16, 2, "笔记本"): (380, 2800),
     # DDR4 台式
     ("DDR4", 4, 1, "台式"): (40, 180),
     ("DDR4", 8, 1, "台式"): (70, 320),
@@ -45,6 +47,22 @@ BASELINE = {
     ("DDR4", 8, 1, "笔记本"): (70, 300),
     ("DDR4", 16, 1, "笔记本"): (150, 650),
     ("DDR4", 8, 2, "笔记本"): (150, 600),
+    # DDR3 台式（老平台，仍在售，价格远低于 DDR4）
+    # 加这一档的意义：¥69 的「DDR4 8G」落在 DDR4 下界 ¥70 之下，
+    # 但正好落在 DDR3 8G 的正常区间里 —— 说明它其实是 DDR3 冒充 DDR4。
+    ("DDR3", 2, 1, "台式"): (12, 60),
+    ("DDR3", 4, 1, "台式"): (18, 80),
+    ("DDR3", 8, 1, "台式"): (30, 140),
+    ("DDR3", 16, 1, "台式"): (90, 320),
+    ("DDR3", 8, 2, "台式"): (60, 260),
+    # DDR3 笔记本
+    ("DDR3", 2, 1, "笔记本"): (10, 55),
+    ("DDR3", 4, 1, "笔记本"): (15, 75),
+    ("DDR3", 8, 1, "笔记本"): (28, 130),
+    # DDR2 台式（更老，价格更低，仅作兜底避免被当成 DDR4 离谱低价）
+    ("DDR2", 1, 1, "台式"): (6, 30),
+    ("DDR2", 2, 1, "台式"): (10, 45),
+    ("DDR2", 4, 1, "台式"): (15, 70),
     # 显卡（全新一手）
     ("RTX", "5060", 8): (1800, 3200),
     ("RTX", "5060", 12): (2200, 3800),
@@ -122,6 +140,62 @@ def _iqr_bounds(prices):
     return q1 - 1.5 * iqr, q3 + 1.5 * iqr
 
 
+def _oldgen_cross(price, spec, cnt=None):
+    """判断"当代内存的价格是否落在旧代的价格带里" —— 疑似旧代 SKU 混入。
+
+    真实案例：某标题挂 DDR4 8G，列表页 ¥68。它的详情页 SKU 表里，
+    ¥69 那一档其实是「4G DDR3 1600」。也就是说这个 ¥68 属于 DDR3，
+    被当成了 DDR4 8G 的最低报价。
+
+    判据：当代下界以下的价位，如果正好落在旧代（DDR3 → DDR2）同容量的
+    正常区间里，就基本可以确定是旧代混入，而不是"当代跳楼价"。
+
+    返回 (是否疑似, 说明) —— 说明里带上旧代对照证据。
+    """
+    cur = spec.get("gen") if isinstance(spec, dict) else None
+    if cur not in ("DDR4", "DDR5"):
+        return False, ""
+    cap = spec.get("cap")
+    if not cap:
+        return False, ""
+    count = cnt or spec.get("count") or 1
+    mt = spec.get("mem_type") or "通用"
+    # 当代基准下界；低于它就值得怀疑是不是旧代
+    cur_base = _baseline(spec)
+    if not cur_base:
+        return False, ""
+    cur_lo = cur_base[0]
+    if price >= cur_lo:
+        return False, ""
+
+    # 逐个旧代试算：价格是否落在某旧代的正常区间内
+    # 约束用「区间中心的相对位置」而不是「上界必须低于当代下界」：
+    #   DDR3 8G ¥30-140 与 DDR4 8G ¥70-320 是重叠的（旧代上界 140 > 当代下界 70），
+    #   但旧代中心 ¥85 明显低于当代中心 ¥195 —— 这个价位属于旧代，不是当代跳楼价。
+    # 「价格同时落在旧代带内 + 明显低于当代下界」两个条件一起用才准。
+    order = ("DDR3", "DDR2") if cur == "DDR4" else ("DDR4", "DDR3", "DDR2")
+    for old in order:
+        for t in ([mt] if mt != "通用" else ["台式", "笔记本"]):
+            r = _valid_pair(BASELINE.get((old, cap, count, t)))
+            if not r:
+                continue
+            lo, hi = r
+            old_mid = (lo + hi) / 2
+            cur_mid = (cur_lo + cur_base[1]) / 2
+            # 旧代中心必须明显低于当代中心（至少低 35%），否则两代价格带交织、不可判
+            if old_mid > cur_mid * 0.65:
+                continue
+            # 价格要落在旧代带内即可。不再附加"低于当代下界 10%"这种条件 ——
+            # DDR3 8G 带 ¥30-140 与 DDR4 8G 下界 ¥70 就只差几块钱，
+            # 加那个条件会让 ¥68 这种典型混入反而判不出来。
+            if lo <= price <= hi:
+                return True, (f"¥{price:.0f} 落在 {old} {cap}G"
+                              f"{'×'+str(count) if count > 1 else ''} 的正常区间 "
+                              f"¥{lo:.0f}-¥{hi:.0f} 内（该代中心 ¥{old_mid:.0f} 远低于 "
+                              f"{cur} 中心 ¥{cur_mid:.0f}），疑似旧代 SKU 混入")
+    return False, ""
+
+
 def judge(price, spec, peers, is_used=False):
     """判断单件价格是否离谱。
 
@@ -148,6 +222,14 @@ def judge(price, spec, peers, is_used=False):
         return _judge_used(price, spec, peers)
 
     # ---------- 一手 ----------
+    # 先做"疑似旧代混入"检查：这个低价其实属于 DDR3/DDR2 的价位带，
+    # 说明列表价对应的是旧代 SKU，不能当成当代的最低价。
+    # 放在 IQR 之前，因为 IQR 是同档自比 —— 如果这一档全是混进来的旧代低价，
+    # IQR 会把它们当成"正常"，反而抓不出来。
+    cross, why = _oldgen_cross(price, spec)
+    if cross:
+        return "reject", why, None, None
+
     bounds = _iqr_bounds(peers) if peers else None
     if bounds:
         lo, hi = bounds

@@ -60,15 +60,40 @@ def _norm(t):
     return (t or "").lower()
 
 
-def check_title_padding(title):
-    """标题堆砌检测：同时涵盖多个互斥规格 = 钓鱼标题。"""
+def check_title_padding(title, group_id=None):
+    """标题堆砌检测：同时涵盖多个互斥规格 = 钓鱼标题。
+
+    group_id 用来判断「跨代」是否算混淆：
+      · 搜 DDR4 时标题出现 DDR3/DDR2 → 便宜的那一档几乎都是旧代，必须剔除
+      · 搜 DDR5 时出现 DDR4 同理
+    跨代比单纯的多容量更危险：多容量至少还是同代（只是不知道对应哪档，可去
+    详情页读 SKU），跨代则是拿旧代的价格冒充当代的最低价。
+    """
     low = _norm(title)
     reasons = []
 
     has_ddr5 = ("ddr5" in low) or ("ddr 5" in low)
     has_ddr4 = ("ddr4" in low) or ("ddr 4" in low)
-    if has_ddr5 and has_ddr4:
-        reasons.append("标题同时写 DDR4 和 DDR5")
+    has_ddr3 = ("ddr3" in low) or ("ddr 3" in low)
+    has_ddr2 = ("ddr2" in low) or ("ddr 2" in low)
+
+    gens = set()
+    for name, flag in (("DDR5", has_ddr5), ("DDR4", has_ddr4),
+                       ("DDR3", has_ddr3), ("DDR2", has_ddr2)):
+        if flag:
+            gens.add(name)
+
+    if len(gens) >= 2:
+        reasons.append("标题跨代堆砌（" + "/".join(sorted(gens)) + "）")
+
+    # 搜当代时混进旧代 —— 直接判为混淆，因为低价对应的一定是旧代那个 SKU
+    expect = {"ddr5": "DDR5", "ddr4": "DDR4"}.get(group_id or "")
+    old_gens = {"DDR3", "DDR2"}
+    if expect and expect not in ("DDR3", "DDR2"):
+        sneaked = gens & old_gens
+        if sneaked:
+            reasons.append(
+                "搜 " + expect + " 却混入旧代（" + "/".join(sorted(sneaked)) + "），最低价多半是旧代 SKU")
 
     has_desk = ("台式" in low) or ("台式机" in low) or ("dimm" in low and "sodimm" not in low)
     has_lap = ("笔记本" in low) or ("笔电" in low) or ("sodimm" in low) or ("pc5-" in low)
@@ -138,7 +163,7 @@ def check_price_anomaly(price, peers):
     return None
 
 
-def score(item, peers=None):
+def score(item, peers=None, group_id=None):
     """给一件商品打分。返回 (是否可疑, 分数, 理由列表, 是否二手)。"""
     title = item.get("title") or ""
     shop = item.get("shop") or ""
@@ -152,10 +177,16 @@ def score(item, peers=None):
     # 标题堆砌：只有"没有品牌"时才当强信号。
     # 因为正规商家挂多规格（8G/16G/32G 都是选项）是淘宝的常规做法，
     # 有品牌的多规格标题不该误杀。
-    pad = check_title_padding(title)
+    pad = check_title_padding(title, group_id=group_id)
     if pad:
         reasons.extend(pad)
-        if not has_brand:
+        # 例外：跨代混淆（搜 DDR4/DDR5 却混进 DDR3/DDR2）即使有品牌也必须剔除 ——
+        # 这种标题打出 ¥69 的最低价，那个价一定属于旧代那一档 SKU，
+        # 拿它当"当前代的最低价"是彻头彻尾的错误数据。
+        cross_gen = any("混入旧代" in r or "跨代堆砌" in r for r in pad)
+        if cross_gen:
+            points += 5
+        elif not has_brand:
             points += len(pad) * 2
         else:
             points += 0         # 有品牌的多规格标题：正常，不扣分

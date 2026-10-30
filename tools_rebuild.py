@@ -39,7 +39,9 @@ def main():
     # ---------- 2. 假货指纹 ----------
     for r in rows:
         try:
-            bad, pts, reasons, used = fakefilter.score(r, None)
+            # 传 group_id，才能识别「搜 DDR4 却混进 DDR3」这类跨代混淆
+            bad, pts, reasons, used = fakefilter.score(
+                r, None, group_id=group_of(r.get("keyword")))
         except Exception:
             bad, reasons = False, []
         r["_reject"] = "；".join(reasons[:3]) if bad else ""
@@ -92,24 +94,38 @@ def main():
         return
 
     # ---------- 5. 写库 ----------
+    # 全部写操作走同一个连接。
+    # 早期版本混用了两个连接：DELETE/UPDATE 用本函数新建的 conn，
+    # 而 record_rejected() 走 db 模块的全局连接 —— 两边各自持写锁，
+    # 直接报 "database is locked"。统一成一个连接才不会自锁。
     import sqlite3
-    conn = sqlite3.connect(config.DB_PATH)
+    import time as _time
+    conn = sqlite3.connect(config.DB_PATH, timeout=30)
     n_del = n_upd = 0
-    for r in rows:
-        if r["_reject"]:
-            db.record_rejected(r["platform"], r.get("keyword"), r, r["_reject"])
-            conn.execute("DELETE FROM products WHERE id=?", (r["id"],))
-            n_del += 1
-        else:
-            conn.execute(
-                "UPDATE products SET spec_key=?, condition=?, price_level=?, price_note=? WHERE id=?",
-                (r["_cat"], r["_cond"], "review" if r.get("_level") == "review" else "ok",
-                 r.get("_note") or "", r["id"]),
-            )
-            n_upd += 1
-    conn.commit()
-    conn.close()
-    print(f"\n已写库：删除 {n_del} 件（转入 rejected），更新 {n_upd} 件")
+    try:
+        for r in rows:
+            if r["_reject"]:
+                conn.execute(
+                    """INSERT INTO rejected(platform, keyword, title, price, shop, url, reason, ts)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (r["platform"], r.get("keyword") or "", r.get("title") or "",
+                     r.get("price") or 0, r.get("shop") or "", r.get("url") or "",
+                     r["_reject"], _time.time()),
+                )
+                conn.execute("DELETE FROM products WHERE id=?", (r["id"],))
+                n_del += 1
+            else:
+                conn.execute(
+                    "UPDATE products SET spec_key=?, condition=?, price_level=?, price_note=? WHERE id=?",
+                    (r["_cat"], r["_cond"], "review" if r.get("_level") == "review" else "ok",
+                     r.get("_note") or "", r["id"]),
+                )
+                n_upd += 1
+        conn.commit()
+    finally:
+        conn.close()
+    print("")
+    print(f"已写库：删除 {n_del} 件（转入 rejected），更新 {n_upd} 件")
 
 
 if __name__ == "__main__":

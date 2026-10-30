@@ -185,9 +185,10 @@ def _run(task, platforms, group_ids, force_relogin):
                         grouped.setdefault((it["spec_key"], it["condition"]), []).append(it)
 
                     # 1) 假货指纹判定（标题堆砌 / 非商品词 / 通用店名 / 无品牌）
+                    #    group_id 传进去，才能识别"搜 DDR4 却混进 DDR3"这类跨代混淆
                     for it in items:
                         try:
-                            bad, pts, reasons, used = fakefilter.score(it, None)
+                            bad, pts, reasons, used = fakefilter.score(it, None, group_id=g["id"])
                         except Exception:
                             bad, pts, reasons = False, 0, []
                         if bad:
