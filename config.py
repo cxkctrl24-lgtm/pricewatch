@@ -157,6 +157,16 @@ MAX_ITEMS_PER_KEYWORD = 200
 PAGE_TIMEOUT_MS = 45000
 NAV_TIMEOUT_MS = 35000
 
+# ---------- 详情页 SKU 校正 ----------
+# 一件商品挂多个 SKU（横跨 DDR3/DDR4、4G~32G）时，列表页只暴露最低那个价。
+# 拿它配标题分类会把「4G DDR3 ¥69」算成「DDR4 8G 最低价」（实测踩过）。
+# 开启后，对「多容量 / 跨代」的商品额外读一次详情页，用它各档的真实价来定价。
+SKU_REPRICE = True
+# 每次采集最多补读几件详情页（详情页比列表页重得多，且容易被风控）
+SKU_REPRICE_MAX_PER_KEYWORD = 12
+# 详情页之间的间隔（秒）；像真人翻页，不连刷
+SKU_REPRICE_GAP = (3.0, 6.0)
+
 
 def pacing(platform):
     """取该平台的节奏参数，缺项回落到全局温和模式默认值。"""
