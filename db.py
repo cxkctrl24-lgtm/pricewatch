@@ -204,7 +204,7 @@ def record_items(task_id, platform, keyword, items, min_ratio=0.01, min_interval
                        (platform, keyword, item_key, title, price, shop, url,
                         first_seen, last_seen, last_price, min_price, min_price_at, spec_key,
                         condition, price_level, price_note)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (platform, keyword, key, it["title"], it["price"], it.get("shop") or "",
                      it["url"], now, now, it["price"], it["price"], now,
                      it.get("spec_key") or "", it.get("condition") or "new",

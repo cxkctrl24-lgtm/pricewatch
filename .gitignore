@@ -17,3 +17,8 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+# 本地部署产物（不进版本库）
+tmp/
+界面对照.png
+启动.bat.bak

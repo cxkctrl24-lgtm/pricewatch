@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 
-from . import classify, config, db, fakefilter, outlier
+from . import classify, config, cooldown, db, fakefilter, outlier
 from .browser import Session, bm
 from .scrapers import collector
 
@@ -132,20 +132,39 @@ def _run(task, platforms, group_ids, force_relogin):
             continue
         bm.login_flags[platform] = True
 
+        # 这个平台还在限流冷却期就别再去撞 —— 越撞锁得越久
+        left = cooldown.remaining(platform)
+        if left > 0:
+            mins = int(left // 60) + 1
+            _msg(task, "warn",
+                 f"{name} 还在限流冷却中（约 {mins} 分钟后解除，"
+                 f"已连续被限 {cooldown.hits(platform)} 次），本次先跳过")
+            db.record_snapshot(task["id"], platform, None, "cooldown",
+                               f"冷却中 {mins} 分钟", 0)
+            task["progress"]["done"] += skipped
+            task.setdefault("cooldown", []).append(platform)
+            try:
+                session.close()
+            except Exception:
+                pass
+            continue
+
         skip_platform = False
         for g in groups:
             if task["status"] != "running" or skip_platform:
                 break
-            lo, hi = g["price"]
+            price_lo, price_hi = g["price"]
             for kw in g["enabled_keywords"]:
                 if task["status"] != "running" or skip_platform:
                     break
                 task["progress"]["current"] = f"{name} · {kw}"
                 try:
-                    status, message, items = collector.collect(session, platform, kw, (lo, hi))
+                    status, message, items = collector.collect(session, platform, kw, (price_lo, price_hi))
                 except Exception as e:
                     status, message, items = "error", str(e)[:200], []
                 if status == "ok":
+                    # 这一轮采成了 —— 该平台的限流冷却清零，退避重来
+                    cooldown.clear(platform)
                     # ===== 三级过滤：可疑丢弃 / 异常标记 / 正常收录 =====
                     kept = []
                     suspect_n = 0
@@ -224,9 +243,12 @@ def _run(task, platforms, group_ids, force_relogin):
                     _msg(task, "warn", f"{name} · {kw}: 被要求登录，去登录后重跑这个平台")
                 elif status == "rate_limited":
                     db.record_snapshot(task["id"], platform, kw, "rate_limited", message, 0)
+                    _wait = cooldown.record_limit(platform)
+                    _hits = cooldown.hits(platform)
                     _msg(task, "warn",
-                         f"{name} 触发搜索限流（{message}），这个平台剩下的关键词先跳过，"
-                         f"{int(config.RATE_LIMIT_COOLDOWN // 60)} 分钟后再跑就不会被拦")
+                         f"{name} 触发搜索限流（{message}），这个平台剩下的关键词先跳过。"
+                         f"本次冷却 {int(_wait // 60)} 分钟（连续第 {_hits} 次被限，"
+                         f"冷却自动翻倍，采成一次就清零）")
                     # 剩下的关键词全部记为跳过，避免继续撞墙把限流时间拉长
                     remaining = len(g["enabled_keywords"]) - g["enabled_keywords"].index(kw) - 1
                     for _ in range(remaining):
@@ -239,7 +261,7 @@ def _run(task, platforms, group_ids, force_relogin):
                     db.record_snapshot(task["id"], platform, kw, "error", message, 0)
                     _msg(task, "error", f"{name} · {kw}: {message}")
                 task["progress"]["done"] += 1
-                time.sleep(random.uniform(*config.GENTLE_KW_GAP))
+                time.sleep(random.uniform(*config.pacing(platform)["kw_gap"]))
 
         bm.set_active(platform, None)
         try:
@@ -249,8 +271,14 @@ def _run(task, platforms, group_ids, force_relogin):
         # 平台之间歇一会儿，别三个站连着刷
         if config.GENTLE and task["status"] == "running":
             if skip_platform:
-                rest = float(config.RATE_LIMIT_COOLDOWN)
-                _msg(task, "warn", f"{name} 被限流，冷却 {int(rest // 60)} 分钟再继续下一个平台")
+                # 不再傻等整个冷却窗口（京东可能锁半小时以上），只提示，
+                # 真正的等待由 cooldown.json 跨会话负责，下次采集会自动跳过。
+                left = cooldown.remaining(platform)
+                if left > 0:
+                    _msg(task, "warn",
+                         f"{name} 被限流，冷却约 {int(left // 60) + 1} 分钟。"
+                         f"不用干等，直接换下一个平台 / 稍后再点采集即可")
+                rest = min(float(left), 30.0) if left > 0 else 0.0
             else:
                 rest = random.uniform(*config.GENTLE_PLATFORM_GAP)
                 _msg(task, "info", f"歇 {rest:.0f} 秒再切下一个平台（温和模式）")

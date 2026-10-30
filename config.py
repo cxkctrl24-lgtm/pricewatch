@@ -121,11 +121,55 @@ GENTLE_PLATFORM_GAP = (6.0, 13.0)  # 两个平台之间（秒）
 GENTLE_SCROLL_PAUSE = (1.0, 2.6)   # 每次滚动之间（秒）
 GENTLE_REST_LONG = (3.0, 6.0)      # 滚动中途的长停顿（秒）
 
+# ---------- 分平台节奏：谁更敏感就压更慢 ----------
+# 京东对搜索频次最敏感（"访问频繁"来得又快又久），单独给它更慢的节奏。
+PLATFORM_PACING = {
+    "jd": {
+        "scroll_times": 8,                    # 滚得少一点，减少请求次数
+        "kw_gap": (10.0, 22.0),               # 关键词之间拉长
+        "scroll_pause": (2.0, 4.5),
+        "rest_long": (5.0, 10.0),
+        "home_pause": (4000, 7000),           # 首页预热更久
+        "cooldown": 1800,                     # 限流后冷却 30 分钟
+    },
+    "taobao": {
+        "scroll_times": 12,
+        "kw_gap": (4.0, 9.0),
+        "scroll_pause": (1.0, 2.6),
+        "rest_long": (3.0, 6.0),
+        "home_pause": (2000, 3600),
+        "cooldown": 900,
+    },
+    "pdd": {
+        "scroll_times": 10,
+        "kw_gap": (5.0, 10.0),
+        "scroll_pause": (1.2, 3.0),
+        "rest_long": (3.0, 7.0),
+        "home_pause": (2500, 4200),
+        "cooldown": 900,
+    },
+}
+
+
 # 被平台限流（"访问频繁"）后冷却多久再继续。京东对这个特别敏感。
-RATE_LIMIT_COOLDOWN = 600      # 秒，10 分钟
+RATE_LIMIT_COOLDOWN = 600      # 秒，默认 10 分钟；按平台见 PLATFORM_PACING
 MAX_ITEMS_PER_KEYWORD = 200
 PAGE_TIMEOUT_MS = 45000
 NAV_TIMEOUT_MS = 35000
+
+
+def pacing(platform):
+    """取该平台的节奏参数，缺项回落到全局温和模式默认值。"""
+    base = {
+        "scroll_times": SCROLL_TIMES,
+        "kw_gap": GENTLE_KW_GAP,
+        "scroll_pause": GENTLE_SCROLL_PAUSE,
+        "rest_long": GENTLE_REST_LONG,
+        "home_pause": GENTLE_HOME_PAUSE,
+        "cooldown": RATE_LIMIT_COOLDOWN,
+    }
+    base.update(PLATFORM_PACING.get(platform, {}))
+    return base
 
 # 每日自动采集（本机时区）
 SCHEDULE_ENABLED = True
@@ -138,5 +182,6 @@ MOBILE_VIEWPORT = {"width": 420, "height": 900}
 
 DESKTOP_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
 MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 "
              "(KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")

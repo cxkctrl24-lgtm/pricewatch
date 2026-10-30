@@ -60,13 +60,26 @@ BASELINE = {
 USED_RATIO = (0.30, 0.75)
 
 
+def _valid_pair(r):
+    """基准表里的 (low, high) 可能有个别缺项，只接受两个都是正数的。"""
+    if not r:
+        return None
+    try:
+        lo, hi = float(r[0]), float(r[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if lo <= 0 or hi <= 0:
+        return None
+    return lo, hi
+
+
 def _baseline(spec):
     """按规格查内置基准价。返回 (low, high) 或 None。"""
     if not spec:
         return None
     if spec.get("gpu"):
         key = ("RTX", spec["gpu"].replace("RTX ", ""), spec.get("vram"))
-        return BASELINE.get(key)
+        return _valid_pair(BASELINE.get(key))
     gen = spec.get("gen")
     cap = spec.get("cap")
     cnt = spec.get("count") or 1
@@ -75,17 +88,29 @@ def _baseline(spec):
         return None
     # 通用型先试台式，再试笔记本
     for t in ([mt] if mt != "通用" else ["台式", "笔记本"]):
-        r = BASELINE.get((gen, cap, cnt, t))
+        r = _valid_pair(BASELINE.get((gen, cap, cnt, t)))
         if r:
             return r
     return None
 
 
 def _iqr_bounds(prices):
-    """IQR 上下界。样本 < 4 返回 None。"""
-    if len(prices) < 4:
+    """IQR 上下界。样本 < 4 返回 None。
+
+    先清洗：None / 非数字 / <=0 的价格全部丢弃。
+    采集侧偶尔会漏掉价格（解析不到"¥"），混进来会让 median/排序直接崩。
+    """
+    clean = []
+    for p in prices or ():
+        try:
+            v = float(p)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            clean.append(v)
+    if len(clean) < 4:
         return None
-    s = sorted(prices)
+    s = sorted(clean)
     n = len(s)
     q1 = statistics.median(s[: n // 2])
     q3 = statistics.median(s[(n + 1) // 2:])
@@ -106,6 +131,17 @@ def judge(price, spec, peers, is_used=False):
     """
     if not price or price <= 0:
         return "reject", "价格无效", None, None
+
+    # peers 里可能混进 None / 空串（解析不到价格），统一清成干净的浮点列表
+    clean_peers = []
+    for p in (peers or ()):
+        try:
+            v = float(p)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            clean_peers.append(v)
+    peers = clean_peers
 
     # 二手用一手价的比例区间判定
     if is_used:
@@ -159,9 +195,15 @@ def _judge_used(price, spec, peers):
     if used_median and used_median > 0 and price < used_median * 0.35:
         return "reject", f"远低于同档二手价 ¥{used_median:.0f}（仅 {price/used_median*100:.0f}%）", None, None
     if base:
-        one_hand_low = base[0]
+        one_hand_low = base[0] if len(base) > 0 else None
         # 二手不可能低于一手的 15%，那基本是配件/空盒/定金
-        if price < one_hand_low * 0.15:
+        # 基准表里个别规格的下界可能缺失，缺了就跳过这条判定
+        if one_hand_low is not None:
+            try:
+                one_hand_low = float(one_hand_low)
+            except (TypeError, ValueError):
+                one_hand_low = None
+        if one_hand_low is not None and one_hand_low > 0 and price < one_hand_low * 0.15:
             return "reject", f"低于一手价下限 ¥{one_hand_low:.0f} 的 15%（疑似配件）", None, None
     return "ok", "", None, None
 

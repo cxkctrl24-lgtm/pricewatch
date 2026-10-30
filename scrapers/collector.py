@@ -234,11 +234,37 @@ RATE_LIMIT_MARKS = (
     "验证一下",
     "安全验证",
     "滑动验证",
+    # 京东常见风控落地页
+    "访问过于频繁",
+    "查询过于频繁",
+    "频繁访问",
+    "验证码",
+    "为了您的账号安全",
+    "账号存在风险",
+    "网络环境异常",
+    "请拖动滑块",
+    "拖动下方滑块",
+    "人机验证",
+    "安全校验",
 )
 
 
-def _detect_rate_limit(page):
-    """页面里出现限流文案就返回提示原话，否则 None。"""
+def _detect_rate_limit(page, platform=None):
+    """页面里出现限流文案就返回提示原话，否则 None。
+
+    除了正文文案，还看 URL 是否被弹到京东的验证/风控中间页 ——
+    京东有时不显示文案，直接 302 到验证页，此时整页也没有商品。
+    URL 指纹只对京东生效，别的平台域名规则不同，不能混用。
+    """
+    if platform == "jd":
+        try:
+            cur = (page.url or "").lower()
+        except Exception:
+            cur = ""
+        for host_mark in ("cfe.jd.com", "verify.jd.com", "risk.jd.com",
+                          "pc-frequent-pro", "risk_handler"):
+            if host_mark in cur:
+                return f"被弹到风控验证页（{host_mark}）"
     try:
         txt = page.inner_text("body") or ""
     except Exception:
@@ -267,18 +293,27 @@ def _has_login_wall(platform, page):
     return False
 
 
-def _scroll(page, times, pause=None):
-    """往下滚加载更多商品。温和模式下滚动更慢、中途还会停下来歇一会儿。"""
+def _scroll(page, times, pause=None, platform=None):
+    """往下滚加载更多商品。温和模式下滚动更慢、中途还会停下来歇一会儿。
+
+    platform 传入时使用该平台专属节奏（京东更慢，减少触发"访问频繁"）。
+    """
     log("info", f"  滚动 {times} 次加载更多商品")
     gentle = getattr(config, "GENTLE", True)
-    base = config.GENTLE_SCROLL_PAUSE if gentle else (0.7, 1.8)
+    pace = config.pacing(platform) if platform else None
+    if pace:
+        base = pace["scroll_pause"]
+        rest_long = pace["rest_long"]
+    else:
+        base = config.GENTLE_SCROLL_PAUSE if gentle else (0.7, 1.8)
+        rest_long = config.GENTLE_REST_LONG
     for i in range(times):
         try:
             page.mouse.wheel(0, random.randint(700, 1500))
         except Exception:
             break
         if gentle and getattr(config, "SCROLL_REST_EVERY", 3) and (i + 1) % config.SCROLL_REST_EVERY == 0:
-            page.wait_for_timeout(int(random.uniform(*config.GENTLE_REST_LONG) * 1000))
+            page.wait_for_timeout(int(random.uniform(*rest_long) * 1000))
         else:
             page.wait_for_timeout(int((pause or random.uniform(*base)) * 1000))
 
@@ -375,6 +410,7 @@ def collect(session, platform, keyword, price_range):
     page = session.page()
     url = cfg["search_url"].format(q=keyword.replace(" ", "%20"))
     log("info", f"[{name}] 搜索：{keyword}")
+    pace = config.pacing(platform)
     try:
         # 温和模式：先进站像真人一样扫一眼首页，再点进搜索，风控明显更轻
         if getattr(config, "GENTLE", True) and not getattr(session, "home_visited", False):
@@ -382,7 +418,7 @@ def collect(session, platform, keyword, price_range):
             if home:
                 try:
                     page.goto(home, wait_until="domcontentloaded", timeout=config.NAV_TIMEOUT_MS)
-                    page.wait_for_timeout(random.randint(*config.GENTLE_HOME_PAUSE))
+                    page.wait_for_timeout(random.randint(*pace["home_pause"]))
                     page.mouse.wheel(0, random.randint(200, 620))
                     page.wait_for_timeout(random.randint(700, 1600))
                     session.home_visited = True
@@ -398,24 +434,33 @@ def collect(session, platform, keyword, price_range):
             return "need_login", "需要登录", []
 
         # 先查限流：被限流时整页没有商品，滚多久都没用，早点退出省得越滑越黑
-        hit = _detect_rate_limit(page)
+        hit = _detect_rate_limit(page, platform)
         if hit:
             log("warn", f"[{name}] 触发搜索限流：{hit}")
             return "rate_limited", hit, []
 
-        _scroll(page, config.SCROLL_TIMES)
+        _scroll(page, pace["scroll_times"], platform=platform)
         items = _extract_items(page, platform, price_range)
 
         if not items:
             log("info", f"[{name}] 首轮没抓到，再滚一次")
             page.wait_for_timeout(_rand(2500, 4000))
-            _scroll(page, 5)
+            _scroll(page, 5, platform=platform)
             items = _extract_items(page, platform, price_range)
 
         if not items:
+            # 渲染出来几乎是空页（拼多多登录态失效时就是这样），
+            # 与其报"页面改版"，不如让用户去重新登录，能修好。
+            try:
+                body_len = len((page.inner_text("body") or "").strip())
+            except Exception:
+                body_len = 0
+            if body_len < 400 and platform in ("pdd", "taobao", "jd"):
+                log("warn", f"[{name}] 页面几乎是空的（正文 {body_len} 字），大概率登录态失效")
+                return "need_login", f"页面空渲染（正文仅 {body_len} 字），需要重新登录", []
             if _has_login_wall(platform, page):
                 return "need_login", "需要登录", []
-            hit = _detect_rate_limit(page)
+            hit = _detect_rate_limit(page, platform)
             if hit:
                 log("warn", f"[{name}] 触发搜索限流：{hit}")
                 return "rate_limited", hit, []

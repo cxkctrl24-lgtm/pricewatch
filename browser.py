@@ -53,6 +53,66 @@ def profile_path(platform):
     return p
 
 
+# Chromium 的单实例锁文件；进程被强杀后会残留，导致下次启动
+# "Failed to create a ProcessSingleton for your profile directory"
+PROFILE_LOCK_FILES = (
+    "lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie",
+)
+
+
+def _clean_profile_locks(user_data_dir):
+    """删掉僵死的 profile 锁文件。进程还活着时这些删了也无害，进程会自己重建。"""
+    if not user_data_dir:
+        return 0
+    n = 0
+    for name in PROFILE_LOCK_FILES:
+        p = os.path.join(user_data_dir, name)
+        try:
+            if os.path.lexists(p):
+                os.remove(p)
+                n += 1
+        except Exception:
+            pass
+    return n
+
+
+def _kill_profile_holders(user_data_dir):
+    """杀掉仍在占用该 profile 目录的本机 Edge/Chrome 进程。
+
+    只杀命令行里带本 profile 路径的进程 —— 绝不碰用户自己开着的浏览器。
+    返回被清理的进程数。
+    """
+    if not user_data_dir or os.name != "nt":
+        return 0
+    uad = os.path.normcase(os.path.abspath(user_data_dir))
+    uad_alt = uad.replace("\\", "/")
+    script = (
+        "$d=[Console]::In.ReadToEnd();"
+        "Get-CimInstance Win32_Process -Filter \"name='msedge.exe' or name='chrome.exe'\" | "
+        "Where-Object { $_.CommandLine -and ("
+        "($_.CommandLine -like ('*'+$d+'*')) -or ($_.CommandLine -like ('*'+$d.Replace('\\','/')+'*'))) } | "
+        "ForEach-Object { $_.ProcessId }"
+    )
+    killed = 0
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            input=uad, capture_output=True, text=True, timeout=25,
+        ).stdout
+        pids = [int(x) for x in out.split() if x.strip().isdigit()]
+        for pid in pids:
+            try:
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                               capture_output=True, timeout=15)
+                killed += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return killed
+
+
 def _browser_kwargs(platform, headless):
     cfg = config.PLATFORMS[platform]
     return dict(
@@ -101,24 +161,57 @@ class Session:
         return self
 
     def _launch(self, kw):
-        """自带 chromium → 本机 Edge → 本机 Chrome，依次尝试。"""
+        """自带 chromium → 本机 Edge → 本机 Chrome，依次尝试。
+
+        启动前先做 profile 卫生：上次崩溃或被强杀会在 user_data_dir 里留下
+        lockfile / Singleton 锁，且残留的 msedge.exe 仍持有该目录，于是下次启动报
+        "Target page, context or browser has been closed" 或
+        "Failed to create a ProcessSingleton for your profile directory"。
+        这里先清僵尸锁；仍失败就杀掉占用该 profile 的残留进程再重试一次。
+        """
         pw = self.pw
+        uad = kw.get("user_data_dir")
         bundle = pw.chromium.executable_path
         if bundle and os.path.exists(bundle):
+            _clean_profile_locks(uad)
             return pw.chromium.launch_persistent_context(**kw)
         log("info", "自带的 Chromium 未安装，改用本机 Edge 浏览器")
-        try:
+
+        def _try_edge():
             return pw.chromium.launch_persistent_context(channel="msedge", **kw)
+
+        # 第一轮：清僵死锁再试
+        n = _clean_profile_locks(uad)
+        if n:
+            log("info", f"已清理 {n} 个残留 profile 锁文件")
+        try:
+            return _try_edge()
         except Exception as e:
-            log("warn", f"Edge 启动失败({str(e)[:80]})，改试本机 Chrome")
-            for exe in (
-                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-                os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-            ):
-                if os.path.exists(exe):
+            first = e
+            log("warn", f"Edge 启动失败({str(e)[:80]})，清理残留进程后重试")
+
+        # 第二轮：杀掉占用该 profile 的残留浏览器进程 → 再清锁 → 再试
+        killed = _kill_profile_holders(uad)
+        _clean_profile_locks(uad)
+        if killed:
+            log("info", f"已清理 {killed} 个占用该 profile 的残留浏览器进程")
+            time.sleep(1.0)
+        try:
+            return _try_edge()
+        except Exception as e2:
+            log("warn", f"清理后 Edge 仍失败({str(e2)[:80]})，改试本机 Chrome")
+
+        for exe in (
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        ):
+            if os.path.exists(exe):
+                try:
                     return pw.chromium.launch_persistent_context(executable_path=exe, **kw)
-            raise e
+                except Exception:
+                    continue
+        raise first
 
     def close(self):
         ctx, pw = self.ctx, self.pw
