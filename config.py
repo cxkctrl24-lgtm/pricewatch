@@ -212,6 +212,21 @@ PLATFORM_PROXY = {}
 # 采集前是否探测出口并在日志里说明（不做准入阻断，只提示）
 PROBE_EGRESS_ON_START = True
 
+# ---------- 反自动化指纹 ----------
+# 指纹实测（tmp/fp_compare.py）发现的项目会话 vs 干净 Edge 差异：
+#   permissions.query 被改写 → 函数不再是 native code（最明显破绽）
+#   plugins 被伪造成 [1,2,3,4,5] → 结构经不起检查
+#   hardwareConcurrency 写死 8 → 与 deviceMemory=16 不自洽
+#   viewport/inner/outer/screen 全是 1440×900 → 视口=屏幕=窗口，不自然
+# 以上已在 browser.py 的 STEALTH_JS / _browser_kwargs 中修正。
+#
+# 桌面端用真实窗口尺寸（关闭固定 viewport）。若发现某平台解析受影响可置 False。
+USE_REAL_VIEWPORT = True
+# 窗口尺寸与屏幕尺寸（分离设置，避免"视口=屏幕=窗口"的不自然一致）。
+# 实测：不做处理时 headless Edge 会掉到 800×600，比原来更假。
+REAL_WINDOW_SIZE = (1280, 720)
+REAL_SCREEN_SIZE = (1920, 1080)
+
 
 # 节奏自适应：被限流过就自动放慢，采顺了再逐步恢复。
 # hits 来自 cooldown.json 的连续限流次数（1 次 → ×1.5，2 次 → ×2.5，3 次 → ×4）。

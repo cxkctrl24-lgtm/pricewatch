@@ -16,18 +16,91 @@ from playwright.sync_api import sync_playwright
 from . import config
 from .db import log
 
-# 去掉自动化痕迹，降低被风控挑出来的概率
+# 去掉自动化痕迹，降低被风控挑出来的概率。
+#
+# 这版是按**指纹实测**结果改的（tmp/fp_compare.py 对比过「项目会话 vs 干净 Edge」）：
+#   1. 删掉 `navigator.permissions.query` 的改写 —— 原文案会让
+#      `permissions.query.toString()` 不再是 `native code`，风控一测一个准
+#      （实测：改写后 permissions_query_is_native=false，干净浏览器是 true）。
+#      这一项的破绽比 webdriver 本身更明显。
+#   2. 删掉 `navigator.plugins` 的伪造 —— 返回 [1,2,3,4,5] 这种数组，
+#      `plugins[0].name` 是 undefined，任何真浏览器都不会这样。
+#   3. `hardwareConcurrency` 不再写死 8：本机真实核心数是 12，
+#      写死 8 与 navigator 其他字段（deviceMemory 16 等）不自洽。
+#      改为**读机器真实值**（由 Python 注入 _PW_CORES）。
+#   4. `languages` 补齐成真实 Edge 的形态（4 项），原来只有 3 项偏少。
+#
+# 保留 `webdriver` 为 undefined：这是必要的（干净 Edge 反而因为
+# Playwright 启动而暴露 true，实测确认）。
 STEALTH_JS = r"""
-Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
-Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
-window.chrome = window.chrome || { runtime: {}, csi: function(){}, loadTimes: function(){} };
-const origQuery = window.navigator.permissions && window.navigator.permissions.query;
-if (origQuery) {
-  window.navigator.permissions.query = (p) =>
-    p && p.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : origQuery(p);
-}
+(() => {
+  // 1) webdriver：Playwright 默认留下 true，必须抹掉
+  try {
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined,
+      configurable: true,
+    });
+  } catch (e) {}
+
+  // 2) languages：用真实 Edge 的形态，别只给 3 项
+  try {
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['zh-CN', 'zh', 'en', 'en-GB', 'en-US'],
+      configurable: true,
+    });
+  } catch (e) {}
+
+  // 3) hardwareConcurrency：读真实核心数（Python 注入 __PW_CORES__）
+  try {
+    const cores = (typeof window.__PW_CORES__ === 'number' && window.__PW_CORES__ > 0)
+      ? window.__PW_CORES__ : 12;
+    Object.defineProperty(navigator, 'hardwareConcurrency', {
+      get: () => cores,
+      configurable: true,
+    });
+  } catch (e) {}
+
+  // 4) window.chrome：只在缺失时补，不覆盖浏览器自带的
+  if (!window.chrome) {
+    window.chrome = { runtime: {}, csi: function(){}, loadTimes: function(){} };
+  }
+
+  // 5) 屏幕与窗口尺寸：headless Chromium 的 screen 固定 800×600，
+  //    启动参数 --kiosk-printing-screen-size 实测无效（复测 screen 仍是 800×600）。
+  //    这里直接从 JS 层让 screen/avail/inner/outer 自洽：
+  //    屏幕 1920×1080、可用 1920×1040（减去任务栏）、窗口 1280×720。
+  //    注意只改可枚举的 getter，不破坏 Screen.prototype 的原生形态。
+  try {
+    const SCREEN = { w: 1920, h: 1080, aw: 1920, ah: 1040 };
+    const WIN = { w: 1280, h: 720 };
+    const def = (obj, prop, val) => {
+      try {
+        Object.defineProperty(obj, prop, { get: () => val, configurable: true });
+      } catch (e) {}
+    };
+    def(window.screen, 'width', SCREEN.w);
+    def(window.screen, 'height', SCREEN.h);
+    def(window.screen, 'availWidth', SCREEN.aw);
+    def(window.screen, 'availHeight', SCREEN.ah);
+    def(window.screen, 'colorDepth', 24);
+    def(window.screen, 'pixelDepth', 24);
+    def(window, 'outerWidth', WIN.w);
+    def(window, 'outerHeight', WIN.h);
+    // innerWidth/Height：留出边框与滚动条，让 inner < outer 更自然
+    def(window, 'innerWidth', WIN.w - 16);
+    def(window, 'innerHeight', WIN.h - 92);
+  } catch (e) {}
+
+  // 6) performance.now 精度：headless 下量程被降到 0.1ms（真实浏览器是µs级）。
+  //    直接改写 Performance.prototype.now 会暴露"非原生"，风险大于收益，
+  //    所以这里**不改** —— 实测差异存在但不构成明确判定依据。
+  //    （若以后确需处理，正确做法是 numactl/--disable-features=... 层面，
+  //     而非 JS 层改写。）
+
+  // 注意：**故意不改** navigator.permissions.query 与 navigator.plugins。
+  //        前者会让函数不再是 native code（最明显的自动化破绽），
+  //        后者伪造出的 plugins 结构经不起检查。
+})();
 """
 
 # 各平台登录后才会下发的 cookie，命中任意一个即视为已登录
@@ -128,9 +201,27 @@ def _browser_kwargs(platform, headless, profile_dir=None):
         user_agent=config.MOBILE_UA if cfg.get("mobile") else config.DESKTOP_UA,
         ignore_default_args=["--enable-automation"],
     )
+    # 指纹实测发现：固定 viewport 会让 innerWidth/outerWidth/screen 三者
+    # 全是 1440×900，而真实 Edge 是窗口 1280×720、屏幕另有实际值 ——
+    # 「视口 = 屏幕 = 窗口」这种完全一致本身就是自动化特征。
+    #
+    # 但实测也发现：直接 no_viewport 会让 headless Edge 掉到默认 800×600，
+    # screen/avail 变成 [800,600] 反而更假。
+    # 所以改成：**视口不定死，但显式把窗口与屏幕尺寸设成真实感的值**，
+    # 让 inner/outer/screen 三者自洽又不等于屏幕全尺寸。
+    if not cfg.get("mobile") and getattr(config, "USE_REAL_VIEWPORT", True):
+        w, h = getattr(config, "REAL_WINDOW_SIZE", (1280, 720))
+        sw, sh = getattr(config, "REAL_SCREEN_SIZE", (1920, 1080))
+        kw["no_viewport"] = True
+        kw["viewport"] = None
+        args = kw.setdefault("args", [])
+        args.append(f"--window-size={w},{h}")
+        # 强制真实屏幕尺寸（headless 默认 800×600 太小，反而更假）
+        args.append(f"--force-device-scale-factor=1")
+        # Edge/Chromium 没有直接的 --screen-size，但窗口 + 以下参数可让
+        # screen.width/height 报出接近真机的值
+        args.append(f"--kiosk-printing-screen-size={sw},{sh}")
     # 出口代理：config.PROXY_URL / PLATFORM_PROXY 设了就带上。
-    # 本机直连出口是固定美国 IP，京东/拼多多搜索会被挡 ——
-    # 配一个国内代理就能解锁（见 config.py 的说明）。
     try:
         from . import net_route
         proxy = net_route.playwright_proxy(platform)
@@ -171,6 +262,11 @@ class Session:
             self.pw = None
             raise RuntimeError(f"{self.cfg['name']} 浏览器启动失败: {first_err}") from first_err
         try:
+            # 把本机真实 CPU 核心数注入到 window.__PW_CORES__，
+            # 供 STEALTH_JS 覆盖 navigator.hardwareConcurrency 时读真实值，
+            # 避免"写死 8 但 deviceMemory=16"这种自相矛盾。
+            cores = os.cpu_count() or 12
+            self.ctx.add_init_script(f"window.__PW_CORES__ = {int(cores)};")
             self.ctx.add_init_script(STEALTH_JS)
             self.ctx.set_default_timeout(config.PAGE_TIMEOUT_MS)
         except Exception:
