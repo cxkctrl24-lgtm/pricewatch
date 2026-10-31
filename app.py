@@ -50,6 +50,26 @@ def api_state():
         task["messages"] = runner.current_task()["messages"][-60:] if runner.current_task() else []
     flags = {p: bm.login_flags.get(p, None) for p in PLATFORMS}
     active = bm.snapshot_active()
+
+    # 出口 IP 状态：让「为什么京东/拼多多采不到」在界面上一眼可见。
+    # 探测有 5 分钟缓存，不会每个轮询都打网络。
+    egress = None
+    try:
+        from . import net_route
+        info = net_route.probe()
+        if info:
+            egress = {
+                "ip": info.get("ip"),
+                "country": info.get("country"),
+                "region": info.get("region"),
+                "isp": info.get("isp"),
+                "via": info.get("via"),
+                "domestic": net_route.is_domestic(info),
+                "text": net_route.describe(info),
+            }
+    except Exception:
+        egress = None
+
     return jsonify({
         "ok": True,
         "task": task,
@@ -57,6 +77,7 @@ def api_state():
         "active": active,
         "stats": db.stats(),
         "last": db.last_snapshots(),
+        "egress": egress,
         "now": time.time(),
     })
 

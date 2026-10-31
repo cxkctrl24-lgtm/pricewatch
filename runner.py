@@ -398,6 +398,20 @@ def run_collect(platforms=None, group_ids=None, source="manual", force_relogin=F
 
 def _run(task, platforms, group_ids, force_relogin):
     groups = _prepare_groups(group_ids)
+
+    # 采集前先探一次出口 IP 并写进日志 —— 让"为什么京东/拼多多采不到"
+    # 这个事实在界面上可见，而不是每次白等冷却。
+    if getattr(config, "PROBE_EGRESS_ON_START", True):
+        try:
+            from . import net_route
+            info = net_route.check_on_startup()
+            if info and net_route.is_domestic(info) is False:
+                _msg(task, "warn",
+                     f"当前出口 {net_route.describe(info)} —— 非中国大陆 IP，"
+                     f"京东/拼多多搜索会被平台挡住；淘宝不受影响")
+        except Exception:
+            pass
+
     total = 0
     for p in platforms:
         for g in groups:

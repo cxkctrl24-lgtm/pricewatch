@@ -18,6 +18,7 @@
   </div>
   <div class="top-right">
     <span class="chip" id="schedChip">每日 {{ schedule_time }} 自动采集</span>
+    <span class="chip" id="egressChip" title="当前出口 IP；非中国大陆出口会导致京东/拼多多搜索被风控">出口检测中…</span>
     {% if gentle %}<span class="chip chip-gentle" id="gentleChip" title="慢速拟真：进站先逛首页、滚动随机停顿、关键词之间歇 3–7 秒">🛡 温和模式</span>{% endif %}
     <button class="theme-btn" id="themeBtn" title="切换日间 / 夜间主题">
       <span class="ico" id="themeIco">🌤</span><span id="themeLabel">日间</span>

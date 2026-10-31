@@ -424,3 +424,10 @@ html[data-theme="night"] .ptag.pdd { color: #ff7b8a; border-color: rgba(255,123,
   transition: all .15s ease;
 }
 .curve-btn:hover { border-color: var(--accent-line); color: var(--accent); background: var(--accent-soft); }
+
+/* 出口 IP 芯片：非国内出口时高亮提醒 */
+.chip-warn {
+  border-color: var(--accent-2) !important;
+  color: var(--accent-2) !important;
+  background: rgba(224, 138, 0, .08);
+}

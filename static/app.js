@@ -35,6 +35,7 @@ async function pollState() {
     state = s;
     $("#aliveDot").classList.toggle("off", false);
     renderPlatforms();
+    renderEgress();
     renderTask();
     $("#resultCount").textContent = `${items.length} 条`;
   } catch (e) {
@@ -67,6 +68,30 @@ function renderPlatforms() {
       text.textContent = "还没检测登录态，点「检测」或直接采集";
     }
   });
+}
+
+function renderEgress() {
+  const chip = $("#egressChip");
+  if (!chip) return;
+  const e = state.egress;
+  if (!e || !e.ip) {
+    chip.textContent = "出口未知";
+    chip.className = "chip";
+    chip.title = "没能探测到出口 IP";
+    return;
+  }
+  const dom = e.domestic;
+  const mark = dom === true ? "🟢" : dom === false ? "🔴" : "⚪";
+  chip.textContent = `${mark} ${e.ip} ${e.country || ""} ${e.via === "proxy" ? "代理" : "直连"}`.trim();
+  if (dom === false) {
+    chip.className = "chip chip-warn";
+    chip.title = `出口 ${e.ip}（${e.isp || e.region || "境外"}）不是中国大陆 —— `
+      + `京东/拼多多搜索会被平台风控挡住，淘宝不受影响。`
+      + `要让这两家恢复，在 config.py 里设 PROXY_URL 指向一个国内代理。`;
+  } else {
+    chip.className = "chip";
+    chip.title = `出口 ${e.ip} · ${e.isp || ""}`;
+  }
 }
 
 function renderTask() {

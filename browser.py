@@ -118,7 +118,7 @@ def _kill_profile_holders(user_data_dir):
 
 def _browser_kwargs(platform, headless, profile_dir=None):
     cfg = config.PLATFORMS[platform]
-    return dict(
+    kw = dict(
         user_data_dir=profile_dir or profile_path(platform),
         headless=headless,
         locale="zh-CN",
@@ -128,6 +128,17 @@ def _browser_kwargs(platform, headless, profile_dir=None):
         user_agent=config.MOBILE_UA if cfg.get("mobile") else config.DESKTOP_UA,
         ignore_default_args=["--enable-automation"],
     )
+    # 出口代理：config.PROXY_URL / PLATFORM_PROXY 设了就带上。
+    # 本机直连出口是固定美国 IP，京东/拼多多搜索会被挡 ——
+    # 配一个国内代理就能解锁（见 config.py 的说明）。
+    try:
+        from . import net_route
+        proxy = net_route.playwright_proxy(platform)
+        if proxy:
+            kw["proxy"] = proxy
+    except Exception:
+        pass
+    return kw
 
 
 class Session:
